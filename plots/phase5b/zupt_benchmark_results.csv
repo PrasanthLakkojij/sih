@@ -1,0 +1,6 @@
+Session,Duration (min),Distance (km),Open Term V (m/s),ZUPT Term V (m/s),Open Max V (m/s),ZUPT Max V (m/s),Open Final Err (m),ZUPT Final Err (m),ZUPT Events,Stat Time (min),Improvement (%)
+S-Vw4.parquet,210.9,212.87,1481.0,0.0,1706.2,34.9,2123995.3,99002.0,2738,128.0,95.3
+S-Vta1a.parquet,42.8,40.47,333.1,0.0,391.9,11.2,135737.2,25438.9,471,26.8,81.3
+S-Vtb5.parquet,107.3,110.36,166.5,0.0,180.6,6.1,147065.1,66190.0,646,91.2,55.0
+S-Vta10.parquet,2.5,3.58,2.3,0.0,16.5,10.6,2636.7,3285.8,28,1.6,-24.6
+S-Vtb2.parquet,9.5,4.26,2.0,1.1,18.9,4.9,2151.6,2277.8,96,6.4,-5.9

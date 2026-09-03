@@ -1,0 +1,7 @@
+session,duration_min,distance_m,v_rmse_ms,gyro_final_err_m,gyro_drift_pct,mag_final_err_m,mag_drift_pct
+S-Vta1a.parquet,42.8,40474.6,226.27,135737.2,335.4,316014.8,780.8
+S-Vtb5.parquet,107.3,110361.5,127.85,147065.1,133.3,228489.6,207.0
+S-Vw4.parquet,210.9,212873.2,1141.8,2123995.3,997.8,1714488.1,805.4
+S-Vta10.parquet,2.5,3580.1,4.53,2636.7,73.6,3141.6,87.8
+S-Vtb2.parquet,9.5,4259.9,5.82,2151.6,50.5,2282.9,53.6
+S-Vw1.parquet,34.1,1.0,0.0,0.0,0.0,0.0,0.0

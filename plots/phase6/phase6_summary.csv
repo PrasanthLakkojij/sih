@@ -1,0 +1,5 @@
+Outage Duration (s),Gyro-Only Pos Mean (m),Gyro-Only Pos Median (m),Gyro-Only Pos Max (m),Gyro-Only Vel Mean (m/s),Gyro-Only Head Mean (°),ZUPT v1 Pos Mean (m),ZUPT v1 Pos Median (m),ZUPT v1 Pos Max (m),ZUPT v1 Vel Mean (m/s),ZUPT v1 Head Mean (°)
+30,346.4,389.8,739.9,10.361,26.3,540.7,556.7,985.6,4.594,26.3
+60,736.1,767.8,1618.3,11.551,52.8,1012.0,1002.2,1625.9,5.062,52.8
+120,2140.6,1865.3,4877.8,25.38,42.7,2065.4,1968.7,3280.9,4.51,42.7
+300,6759.0,5126.0,19060.0,34.964,91.2,4449.8,3871.0,7941.1,4.533,91.2

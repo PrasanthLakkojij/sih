@@ -23,8 +23,7 @@ env/
 Thumbs.db
 
 # Large data files — raw CSVs and processed parquet
-data/raw/
-data/processed_sessions/
+data/
 
 # Jupyter
 .ipynb_checkpoints/
