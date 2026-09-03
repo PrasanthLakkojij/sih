@@ -20,7 +20,8 @@ A physics-first, progressively-refined dead reckoning system for vehicle navigat
 | 5C | `phase5c_physics_baseline.py` | ✅ | ZUPT v2 + circular complementary heading filter |
 | 5C-diag | `phase5c_diagnostic_bundle.py` | ✅ | Full diagnostic bundle: trajectory, integration verification, path length |
 | 6 | `phase6_outage_sim.py` | ✅ | GNSS outage simulation (30/60/120/300 s, genuine-fix-snapped init) |
-| 7 | `phase7_ml_velocity.py` | ✅ | ML velocity estimation: LOTO-CV, Ridge/RF/XGBoost/MLP |
+| 8 | `phase8_ml_correction.py` | ✅ | Physics-error-correction ML formulation: Δv vs Δs_corr, duration-ablation (C1 vs C2) & A2 |
+| 9 | `phase9_ai_hybrid.py` | ✅ | AI + Physics Hybrid system (ZUPT v1 + C1 XGBoost displacement correction) |
 
 ## Dataset
 IO-VNBD S-Dataset (not included — commercial licence). Place raw CSVs in `data/raw/`.
@@ -30,14 +31,19 @@ IO-VNBD S-Dataset (not included — commercial licence). Place raw CSVs in `data
 pip install numpy pandas pyarrow scikit-learn xgboost matplotlib scipy
 python phase3_preprocess.py   # builds data/processed_sessions/
 python phase4_orientation.py  # adds vehicle-frame columns
-python phase7_ml_velocity.py  # runs Phase 7 ML experiment
+python phase9_ai_hybrid.py    # runs Phase 9 AI + Physics Hybrid benchmark
 ```
 
-## Key Findings (Physics Baseline)
-- Pure open-loop DR position error at 300 s GNSS outage: **~7 km** (gyro-only)
-- ZUPT v1 reduces this to **~4.7 km** at 300 s, but is **worse** at short outages (30–60 s)
-- Dominant error source: residual accelerometer bias → Δp = (1/2) × ε_a × t²
+## Key Findings (Physics Baselines)
+- Pure open-loop DR position error at 300 s GNSS outage: **~7.0 km** (gyro-only)
+- ZUPT v1 reduces this to **~4.7 km** at 300 s, but is **worse** at short outages (30–60 s) due to false-positive stops during cruise
+- Dominant error source: residual accelerometer bias → $\Delta p = (1/2) \times \varepsilon_a \times t^2$
 - Heading error at 30 s driven by **road curvature** (23.7°), not secular drift (1.57°)
 
-## Key Findings (Phase 7 ML)
-See `plots/phase7/` for full results.
+## Key Findings (Phase 9 AI + Physics Hybrid)
+- **30s Outage:** AI-Hybrid position error **359.6m** (+11.5% vs Gyro, +47.1% vs ZUPT v1)
+- **60s Outage:** AI-Hybrid position error **811.1m** (+9.1% vs Gyro, +38.4% vs ZUPT v1)
+- **120s Outage:** AI-Hybrid position error **1,312.2m** (+22.7% vs Gyro, +40.8% vs ZUPT v1)
+- **300s Outage:** AI-Hybrid position error **3,505.1m** (+50.3% vs Gyro, +26.0% vs ZUPT v1)
+- Caps error growth at 3.5 km compared to 7.0 km open-loop explosion, outperforming all physics baselines across all evaluated durations.
+- Generated presentation assets saved to `plots/phase9/`.
