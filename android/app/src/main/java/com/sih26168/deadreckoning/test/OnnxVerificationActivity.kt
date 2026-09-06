@@ -8,6 +8,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import com.sih26168.deadreckoning.ml.CorrectionModel
 import com.sih26168.deadreckoning.ml.FeatureExtractor
+import com.sih26168.deadreckoning.physics.PhysicsDeadReckoning
 import com.sih26168.deadreckoning.sensor.IMUSensorCollector
 
 class OnnxVerificationActivity : AppCompatActivity() {
@@ -15,6 +16,7 @@ class OnnxVerificationActivity : AppCompatActivity() {
     companion object {
         private const val TAG_ONNX = "SIH_ONNX_TEST"
         private const val TAG_FEATURE = "SIH_FEATURE_TEST"
+        private const val TAG_PHYSICS = "SIH_PHYSICS_TEST"
 
         // Expected 58 features from Window 0
         val EXPECTED_FEATURES_WINDOW_0 = floatArrayOf(
@@ -164,6 +166,55 @@ class OnnxVerificationActivity : AppCompatActivity() {
                 appendLog("  Result: FAILED")
             }
             correctionModel.close()
+
+            // 3. Step 3b: Test PhysicsDeadReckoning on Window 0
+            appendLog("\n==================================================")
+            appendLog("STEP 3b: PHYSICS DEAD RECKONING VERIFICATION")
+            appendLog("==================================================")
+
+            val pdr = PhysicsDeadReckoning()
+            pdr.resetState(
+                x = TestWindow0Data.INITIAL_X,
+                y = TestWindow0Data.INITIAL_Y,
+                heading = TestWindow0Data.INITIAL_HEADING_RAD,
+                velocity = TestWindow0Data.INITIAL_VELOCITY
+            )
+
+            val pResult = pdr.processWindow(
+                accLinX = TestWindow0Data.acc_lin_x,
+                accLinY = TestWindow0Data.acc_lin_y,
+                accLinZ = TestWindow0Data.acc_lin_z,
+                gyroX = TestWindow0Data.gyro_x,
+                gyroY = TestWindow0Data.gyro_y,
+                gyroZ = TestWindow0Data.gyro_z,
+                accVehFwd = TestWindow0Data.acc_veh_fwd,
+                gyroVehYawRate = TestWindow0Data.gyro_veh_yaw_rate,
+                dtArr = TestWindow0Data.dt_sec,
+                segDurS = TestWindow0Data.SEG_DUR_S
+            )
+
+            val diffDs = Math.abs(pResult.deltaS_imu - TestWindow0Data.GT_STANDALONE_DS_IMU)
+            val diffVel = Math.abs(pResult.newVelocity - TestWindow0Data.GT_NEW_VELOCITY)
+            val diffHeadingDeg = Math.abs(pResult.newHeadingDeg - TestWindow0Data.GT_NEW_HEADING_DEG)
+
+            appendLog("Physics DR Output vs Python Ground Truth:")
+            appendLog("  deltaS_imu : Python=${TestWindow0Data.GT_STANDALONE_DS_IMU} m | Kotlin=${pResult.deltaS_imu} m | Diff=${String.format("%.7f", diffDs)} m")
+            appendLog("  newVelocity: Python=${TestWindow0Data.GT_NEW_VELOCITY} m/s | Kotlin=${pResult.newVelocity} m/s | Diff=${String.format("%.7f", diffVel)} m/s")
+            appendLog("  newHeading : Python=${TestWindow0Data.GT_NEW_HEADING_DEG}° | Kotlin=${String.format("%.5f", pResult.newHeadingDeg)}° | Diff=${String.format("%.7f", diffHeadingDeg)}°")
+            appendLog("  Stationary : ${pResult.stationarySamples}/${TestWindow0Data.N_SAMPLES} samples")
+            appendLog("  headingDir : Kotlin=${String.format("%.4f", pResult.headingDirDeg)}° (Python GT: ${TestWindow0Data.GT_HEADING_DIR_DEG}°)")
+
+            val passDs = diffDs <= 0.1f
+            val passVel = diffVel <= 0.05f
+            val passHeading = diffHeadingDeg <= 0.5f
+
+            if (passDs && passVel && passHeading) {
+                Log.i(TAG_PHYSICS, ">>> PHYSICS DEAD RECKONING TEST: PASSED <<<")
+                appendLog("  Result: ALL 3 CRITERIA PASSED (Δs<0.1m, v<0.05m/s, ψ<0.5°)")
+            } else {
+                Log.e(TAG_PHYSICS, ">>> PHYSICS DEAD RECKONING TEST: FAILED <<<")
+                appendLog("  Result: FAILED")
+            }
 
         } catch (e: Exception) {
             Log.e(TAG_FEATURE, "Verification error: ${e.message}", e)
