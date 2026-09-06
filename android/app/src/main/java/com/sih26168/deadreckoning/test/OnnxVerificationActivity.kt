@@ -6,6 +6,8 @@ import android.widget.Button
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import com.sih26168.deadreckoning.engine.NavigationState
+import com.sih26168.deadreckoning.engine.PositionEstimator
 import com.sih26168.deadreckoning.ml.CorrectionModel
 import com.sih26168.deadreckoning.ml.FeatureExtractor
 import com.sih26168.deadreckoning.physics.PhysicsDeadReckoning
@@ -17,6 +19,7 @@ class OnnxVerificationActivity : AppCompatActivity() {
         private const val TAG_ONNX = "SIH_ONNX_TEST"
         private const val TAG_FEATURE = "SIH_FEATURE_TEST"
         private const val TAG_PHYSICS = "SIH_PHYSICS_TEST"
+        private const val TAG_POSITION = "SIH_POSITION_TEST"
 
         // Expected 58 features from Window 0
         val EXPECTED_FEATURES_WINDOW_0 = floatArrayOf(
@@ -37,8 +40,10 @@ class OnnxVerificationActivity : AppCompatActivity() {
 
     private var sensorCollector: IMUSensorCollector? = null
     private var model: CorrectionModel? = null
+    private var positionEstimator: PositionEstimator? = null
     private lateinit var logTextView: TextView
     private var liveWindowCount = 0
+    private var isLiveCollecting = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,7 +63,7 @@ class OnnxVerificationActivity : AppCompatActivity() {
         layout.addView(titleView)
 
         val btnVerify = Button(this).apply {
-            text = "Run Step 3a Verification Test"
+            text = "Run Step 3 Verification Suite"
             setOnClickListener { runVerificationTests() }
         }
         layout.addView(btnVerify)
@@ -68,6 +73,15 @@ class OnnxVerificationActivity : AppCompatActivity() {
             setOnClickListener { toggleLiveSensors() }
         }
         layout.addView(btnStartLive)
+
+        val btnResetOrigin = Button(this).apply {
+            text = "Reset Position to (0,0)"
+            setOnClickListener {
+                positionEstimator?.resetState(0.0f, 0.0f, 0.0f, 0.0f)
+                appendLog("\n[Position Estimator] State reset to Origin (x=0.0m, y=0.0m, heading=0.0°, v=0.0m/s)")
+            }
+        }
+        layout.addView(btnResetOrigin)
 
         val scrollView = ScrollView(this).apply {
             layoutParams = android.widget.LinearLayout.LayoutParams(
@@ -86,14 +100,25 @@ class OnnxVerificationActivity : AppCompatActivity() {
 
         setContentView(layout)
 
+        // Initialize model and sensor listener for live tests
+        val m = CorrectionModel(this)
+        model = m
+        val pe = PositionEstimator(m)
+        pe.resetState(0.0f, 0.0f, 0.0f, 0.0f)
+        positionEstimator = pe
+
+        sensorCollector = IMUSensorCollector(
+            context = this,
+            onWindowSamplesReady = { samples ->
+                onLiveWindowSamplesReceived(samples)
+            },
+            onWindowReady = { features, dtSeconds, sampleCount ->
+                onLiveWindowReceived(features, dtSeconds, sampleCount)
+            }
+        )
+
         // Run automated verification tests on startup
         runVerificationTests()
-
-        // Initialize model and sensor listener for live tests
-        model = CorrectionModel(this)
-        sensorCollector = IMUSensorCollector(this) { features, dtSeconds, sampleCount ->
-            onLiveWindowReceived(features, dtSeconds, sampleCount)
-        }
     }
 
     private fun appendLog(msg: String) {
@@ -216,6 +241,68 @@ class OnnxVerificationActivity : AppCompatActivity() {
                 appendLog("  Result: FAILED")
             }
 
+            // 4. Step 3c: Combined PositionEstimator on Window 0
+            appendLog("\n==================================================")
+            appendLog("STEP 3c: COMBINED POSITION ESTIMATOR (FULL PIPELINE)")
+            appendLog("==================================================")
+
+            val fullEstimator = PositionEstimator(correctionModel)
+            fullEstimator.resetState(
+                x = TestWindow0Data.INITIAL_X,
+                y = TestWindow0Data.INITIAL_Y,
+                heading = TestWindow0Data.INITIAL_HEADING_RAD,
+                velocity = TestWindow0Data.INITIAL_VELOCITY
+            )
+
+            val navState = fullEstimator.estimatePosition(
+                accX = TestWindow0Data.acc_x,
+                accY = TestWindow0Data.acc_y,
+                accZ = TestWindow0Data.acc_z,
+                accLinX = TestWindow0Data.acc_lin_x,
+                accLinY = TestWindow0Data.acc_lin_y,
+                accLinZ = TestWindow0Data.acc_lin_z,
+                gyroX = TestWindow0Data.gyro_x,
+                gyroY = TestWindow0Data.gyro_y,
+                gyroZ = TestWindow0Data.gyro_z,
+                accVehFwd = TestWindow0Data.acc_veh_fwd,
+                gyroVehYawRate = TestWindow0Data.gyro_veh_yaw_rate,
+                dtArr = TestWindow0Data.dt_sec,
+                segDurS = TestWindow0Data.SEG_DUR_S
+            )
+
+            val gtX = -101899.566f
+            val gtY = 38157.767f
+            val gtHeadingDeg = 307.23666f
+            val gtVel = 0.0f
+            val gtDsFinal = 108.93102f
+
+            val diffXEst = Math.abs(navState.x - gtX)
+            val diffYEst = Math.abs(navState.y - gtY)
+            val diffHeadingEst = Math.abs(navState.headingDeg - gtHeadingDeg)
+            val diffVelEst = Math.abs(navState.velocity - gtVel)
+            val diffDsFinalEst = Math.abs(navState.deltaS_final - gtDsFinal)
+
+            appendLog("Combined Estimator Output vs Step 1 Python GT:")
+            appendLog("  X (Easting)  : Python=$gtX m | Kotlin=${String.format("%.3f", navState.x)} m | Diff=${String.format("%.6f", diffXEst)} m")
+            appendLog("  Y (Northing) : Python=$gtY m | Kotlin=${String.format("%.3f", navState.y)} m | Diff=${String.format("%.6f", diffYEst)} m")
+            appendLog("  Heading      : Python=$gtHeadingDeg° | Kotlin=${String.format("%.5f", navState.headingDeg)}° | Diff=${String.format("%.6f", diffHeadingEst)}°")
+            appendLog("  Velocity     : Python=$gtVel m/s | Kotlin=${String.format("%.3f", navState.velocity)} m/s | Diff=${String.format("%.6f", diffVelEst)} m/s")
+            appendLog("  Δs_imu       : Kotlin=${String.format("%.4f", navState.deltaS_imu)} m")
+            appendLog("  Δs_corr      : Kotlin=${String.format("%.4f", navState.deltaS_corr)} m")
+            appendLog("  Δs_final     : Python=$gtDsFinal m | Kotlin=${String.format("%.3f", navState.deltaS_final)} m | Diff=${String.format("%.6f", diffDsFinalEst)} m")
+
+            val passX = diffXEst < 0.05f
+            val passY = diffYEst < 0.05f
+            val passH = diffHeadingEst < 0.01f
+
+            if (passX && passY && passH) {
+                Log.i(TAG_POSITION, ">>> COMBINED POSITION ESTIMATOR TEST: PASSED <<<")
+                appendLog("  Result: ALL CRITERIA PASSED (X/Y diff < 0.05m, heading diff < 0.01°)")
+            } else {
+                Log.e(TAG_POSITION, ">>> COMBINED POSITION ESTIMATOR TEST: FAILED <<<")
+                appendLog("  Result: FAILED")
+            }
+
         } catch (e: Exception) {
             Log.e(TAG_FEATURE, "Verification error: ${e.message}", e)
             appendLog("ERROR: ${e.message}")
@@ -224,21 +311,38 @@ class OnnxVerificationActivity : AppCompatActivity() {
 
     private fun toggleLiveSensors() {
         val collector = sensorCollector ?: return
-        collector.start()
-        appendLog("\n[Live Sensors] Started listening at 10Hz. Move phone around...")
+        if (!isLiveCollecting) {
+            collector.start()
+            isLiveCollecting = true
+            appendLog("\n[Live Sensors] Started listening at 10Hz. Move phone around...")
+        } else {
+            collector.stop()
+            isLiveCollecting = false
+            appendLog("\n[Live Sensors] Stopped listening.")
+        }
+    }
+
+    private fun onLiveWindowSamplesReceived(samples: List<IMUSensorCollector.Sample>) {
+        liveWindowCount++
+        val est = positionEstimator ?: return
+        val state = est.estimatePosition(samples)
+
+        val logMsg = "Live Window #$liveWindowCount (N=${samples.size}): " +
+                "x=${String.format("%.2f", state.x)}m, y=${String.format("%.2f", state.y)}m, " +
+                "heading=${String.format("%.1f", state.headingDeg)}°, v=${String.format("%.2f", state.velocity)}m/s, " +
+                "Δs_imu=${String.format("%.2f", state.deltaS_imu)}m, Δs_corr=${String.format("%.2f", state.deltaS_corr)}m, " +
+                "Δs_final=${String.format("%.2f", state.deltaS_final)}m"
+
+        Log.i(TAG_POSITION, logMsg)
+        appendLog("[$TAG_POSITION] $logMsg")
     }
 
     private fun onLiveWindowReceived(features: FloatArray, dtSeconds: Float, sampleCount: Int) {
-        liveWindowCount++
         val pred = model?.predict(features) ?: 0.0f
-
-        val logMsg = "Window #$liveWindowCount (dt=${String.format("%.2f", dtSeconds)}s, N=$sampleCount): " +
-                "a_mean=${String.format("%.2f", features[0])}, a_std=${String.format("%.2f", features[1])}, " +
-                "al_mag_mean=${String.format("%.2f", features[48])}, w_mag_mean=${String.format("%.3f", features[52])} " +
-                "-> Predicted Δs_corr = ${String.format("%.2f", pred)}m"
-
+        val logMsg = "Feature Check (dt=${String.format("%.2f", dtSeconds)}s): " +
+                "a_mean=${String.format("%.2f", features[0])}, w_mean=${String.format("%.3f", features[52])} " +
+                "-> Δs_corr = ${String.format("%.2f", pred)}m"
         Log.i(TAG_FEATURE, logMsg)
-        appendLog(logMsg)
     }
 
     override fun onDestroy() {

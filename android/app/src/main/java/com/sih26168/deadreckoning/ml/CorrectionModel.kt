@@ -10,6 +10,13 @@ import java.io.InputStream
 import java.nio.FloatBuffer
 
 /**
+ * Functional interface for dead-reckoning correction prediction.
+ */
+fun interface ICorrectionModel {
+    fun predict(features: FloatArray): Float
+}
+
+/**
  * CorrectionModel: Wrapper around the Phase 9 C1 XGBoost ONNX model.
  *
  * Requirements:
@@ -18,23 +25,27 @@ import java.nio.FloatBuffer
  *    matching the FloatTensorType([None, 58]) expected by the converted XGBoost model.
  * 3. Gracefully handles model loading and execution errors.
  */
-class CorrectionModel(private val context: Context) : AutoCloseable {
+class CorrectionModel : ICorrectionModel, AutoCloseable {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private var session: OrtSession? = null
     private val modelAssetPath = "c1_correction_model.onnx"
 
-    init {
-        loadModel()
-    }
-
-    private fun loadModel() {
+    constructor(context: Context) {
         try {
-            // Read ONNX bytes from assets
             val assetManager = context.assets
             val modelBytes = assetManager.open(modelAssetPath).use { input: InputStream ->
                 input.readBytes()
             }
+            session = env.createSession(modelBytes, OrtSession.SessionOptions())
+        } catch (e: Exception) {
+            e.printStackTrace()
+            session = null
+        }
+    }
+
+    constructor(modelBytes: ByteArray) {
+        try {
             session = env.createSession(modelBytes, OrtSession.SessionOptions())
         } catch (e: Exception) {
             e.printStackTrace()
@@ -48,7 +59,7 @@ class CorrectionModel(private val context: Context) : AutoCloseable {
      * @param features FloatArray of size 58.
      * @return Displacement correction in meters (Δs_corr). Returns 0.0f if inference fails.
      */
-    fun predict(features: FloatArray): Float {
+    override fun predict(features: FloatArray): Float {
         val currentSession = session ?: run {
             System.err.println("CorrectionModel: ONNX session is not initialized.")
             return 0.0f

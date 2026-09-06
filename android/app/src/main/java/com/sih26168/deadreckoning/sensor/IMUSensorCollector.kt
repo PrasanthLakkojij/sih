@@ -21,8 +21,14 @@ import kotlin.math.sqrt
  */
 class IMUSensorCollector(
     context: Context,
-    private val onWindowReady: (features: FloatArray, dtSeconds: Float, sampleCount: Int) -> Unit
+    var onWindowSamplesReady: ((samples: List<Sample>) -> Unit)? = null,
+    private val onWindowReady: ((features: FloatArray, dtSeconds: Float, sampleCount: Int) -> Unit)? = null
 ) : SensorEventListener {
+
+    constructor(
+        context: Context,
+        onWindowReady: (features: FloatArray, dtSeconds: Float, sampleCount: Int) -> Unit
+    ) : this(context, onWindowSamplesReady = null, onWindowReady = onWindowReady)
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
 
@@ -153,30 +159,34 @@ class IMUSensorCollector(
                 // Slide window by 90 samples
                 sampleBuffer.removeAll(window)
 
-                val n = window.size
-                val axArr = FloatArray(n) { window[it].accX }
-                val ayArr = FloatArray(n) { window[it].accY }
-                val azArr = FloatArray(n) { window[it].accZ }
-                val lxArr = FloatArray(n) { window[it].accLinX }
-                val lyArr = FloatArray(n) { window[it].accLinY }
-                val lzArr = FloatArray(n) { window[it].accLinZ }
-                val gxArr = FloatArray(n) { window[it].gyroX }
-                val gyArr = FloatArray(n) { window[it].gyroY }
-                val gzArr = FloatArray(n) { window[it].gyroZ }
-                val fwdArr = FloatArray(n) { window[it].accVehFwd }
-                val yawArr = FloatArray(n) { window[it].gyroVehYawRate }
+                onWindowSamplesReady?.invoke(window)
 
-                val dtTotal = (window.last().timestampNs - window.first().timestampNs) / 1_000_000_000f
+                if (onWindowReady != null) {
+                    val n = window.size
+                    val axArr = FloatArray(n) { window[it].accX }
+                    val ayArr = FloatArray(n) { window[it].accY }
+                    val azArr = FloatArray(n) { window[it].accZ }
+                    val lxArr = FloatArray(n) { window[it].accLinX }
+                    val lyArr = FloatArray(n) { window[it].accLinY }
+                    val lzArr = FloatArray(n) { window[it].accLinZ }
+                    val gxArr = FloatArray(n) { window[it].gyroX }
+                    val gyArr = FloatArray(n) { window[it].gyroY }
+                    val gzArr = FloatArray(n) { window[it].gyroZ }
+                    val fwdArr = FloatArray(n) { window[it].accVehFwd }
+                    val yawArr = FloatArray(n) { window[it].gyroVehYawRate }
 
-                val features = FeatureExtractor.extractFeatures(
-                    axArr, ayArr, azArr,
-                    lxArr, lyArr, lzArr,
-                    gxArr, gyArr, gzArr,
-                    fwdArr, yawArr,
-                    dtTotal, n
-                )
+                    val dtTotal = (window.last().timestampNs - window.first().timestampNs) / 1_000_000_000f
 
-                onWindowReady(features, dtTotal, n)
+                    val features = FeatureExtractor.extractFeatures(
+                        axArr, ayArr, azArr,
+                        lxArr, lyArr, lzArr,
+                        gxArr, gyArr, gzArr,
+                        fwdArr, yawArr,
+                        dtTotal, n
+                    )
+
+                    onWindowReady.invoke(features, dtTotal, n)
+                }
             }
         }
     }
