@@ -1,14 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-permission android:name="android.intent.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.intent.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.intent.permission.INTERNET" />
+    <uses-permission android:name="android.intent.permission.ACCESS_NETWORK_STATE" />
+
     <application
         android:allowBackup="true"
         android:label="DeadReckoningApp"
         android:supportsRtl="true"
         android:theme="@style/Theme.DeadReckoningApp">
 
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="@string/google_maps_key" />
+
+        <!-- Main Live Map & Dual Marker Navigation Activity -->
         <activity
-            android:name="com.sih26168.deadreckoning.test.OnnxVerificationActivity"
+            android:name="com.sih26168.deadreckoning.ui.MainActivity"
             android:exported="true"
             android:theme="@style/Theme.DeadReckoningApp">
             <intent-filter>
@@ -16,6 +26,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Benchmark Verification Dashboard -->
+        <activity
+            android:name="com.sih26168.deadreckoning.test.OnnxVerificationActivity"
+            android:exported="true"
+            android:theme="@style/Theme.DeadReckoningApp" />
     </application>
 
 </manifest>
