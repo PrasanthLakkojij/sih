@@ -1,6 +1,6 @@
 package com.sih26168.deadreckoning
 
-import com.google.android.gms.maps.model.LatLng
+import com.sih26168.deadreckoning.util.LatLng
 import com.sih26168.deadreckoning.util.SphericalLatLonInterpolator
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

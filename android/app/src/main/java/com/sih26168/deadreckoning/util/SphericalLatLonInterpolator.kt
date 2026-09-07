@@ -1,12 +1,19 @@
 package com.sih26168.deadreckoning.util
 
-import com.google.android.gms.maps.model.LatLng
 import kotlin.math.asin
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
+
+/**
+ * Geographic coordinate pair (latitude, longitude) in degrees.
+ */
+data class LatLng(
+    val latitude: Double,
+    val longitude: Double
+)
 
 /**
  * SphericalLatLonInterpolator:

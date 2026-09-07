@@ -81,7 +81,7 @@ class IMUSensorCollector(
         lastSampleTimeNs = 0L
         isCollecting = true
 
-        val rate = SensorManager.SENSOR_DELAY_FASTEST
+        val rate = SensorManager.SENSOR_DELAY_GAME
         accSensor?.let { sensorManager.registerListener(this, it, rate) }
         linAccSensor?.let { sensorManager.registerListener(this, it, rate) }
         gyroSensor?.let { sensorManager.registerListener(this, it, rate) }

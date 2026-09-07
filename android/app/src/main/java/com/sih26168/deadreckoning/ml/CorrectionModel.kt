@@ -105,7 +105,7 @@ class CorrectionModel : ICorrectionModel, AutoCloseable {
     override fun close() {
         try {
             session?.close()
-            env.close()
+            session = null
         } catch (e: Exception) {
             e.printStackTrace()
         }

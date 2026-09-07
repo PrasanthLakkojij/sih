@@ -172,8 +172,8 @@ class OnnxVerificationActivity : AppCompatActivity() {
             }
 
             // 2. Feed computed features into ONNX CorrectionModel
-            val correctionModel = CorrectionModel(this)
-            val prediction = correctionModel.predict(computedFeatures)
+            val activeModel = model ?: CorrectionModel(this).also { model = it }
+            val prediction = activeModel.predict(computedFeatures)
             val predDiff = Math.abs(prediction - EXPECTED_PREDICTION_METERS)
 
             Log.i(TAG_ONNX, "ONNX Prediction from extracted features: $prediction meters")
@@ -190,7 +190,6 @@ class OnnxVerificationActivity : AppCompatActivity() {
                 Log.e(TAG_ONNX, ">>> ONNX PREDICTION ON EXTRACTED FEATURES: FAILED <<<")
                 appendLog("  Result: FAILED")
             }
-            correctionModel.close()
 
             // 3. Step 3b: Test PhysicsDeadReckoning on Window 0
             appendLog("\n==================================================")
@@ -246,7 +245,7 @@ class OnnxVerificationActivity : AppCompatActivity() {
             appendLog("STEP 3c: COMBINED POSITION ESTIMATOR (FULL PIPELINE)")
             appendLog("==================================================")
 
-            val fullEstimator = PositionEstimator(correctionModel)
+            val fullEstimator = PositionEstimator(activeModel)
             fullEstimator.resetState(
                 x = TestWindow0Data.INITIAL_X,
                 y = TestWindow0Data.INITIAL_Y,

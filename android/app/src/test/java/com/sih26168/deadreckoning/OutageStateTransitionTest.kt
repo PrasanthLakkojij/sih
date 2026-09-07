@@ -83,8 +83,8 @@ class OutageStateTransitionTest {
         val aiDrLat = 12.973150
         val aiDrLon = 77.596120
 
-        val pAi = com.google.android.gms.maps.model.LatLng(aiDrLat, aiDrLon)
-        val pGps = com.google.android.gms.maps.model.LatLng(trueGpsLat, trueGpsLon)
+        val pAi = com.sih26168.deadreckoning.util.LatLng(aiDrLat, aiDrLon)
+        val pGps = com.sih26168.deadreckoning.util.LatLng(trueGpsLat, trueGpsLon)
 
         // Spherical linear interpolation at 0%, 50%, 100%
         val atStart = SphericalLatLonInterpolator.interpolate(0.0f, pAi, pGps)
