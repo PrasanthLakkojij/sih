@@ -33,7 +33,8 @@ data class PhysicsResult(
     val newY: Float,
     val de: Float,
     val dn: Float,
-    val stationarySamples: Int
+    val stationarySamples: Int,
+    val isStationary: Boolean = false
 )
 
 /**
@@ -229,6 +230,11 @@ class PhysicsDeadReckoning(
             consecutiveStationaryCount = streak
         }
 
+        // Determine if device was stationary during this window (no motion)
+        val isStationaryWindow = (stationaryCount >= (nSamples - startK - WINDOW_LEN) || consecutiveStationaryCount >= (nSamples - startK)) &&
+                dsImu < 0.05f &&
+                vStep == 0.0f
+
         return PhysicsResult(
             deltaS_imu = dsImu,
             newHeading = psiStep,
@@ -240,7 +246,8 @@ class PhysicsDeadReckoning(
             newY = newY,
             de = deSub,
             dn = dnSub,
-            stationarySamples = stationaryCount
+            stationarySamples = stationaryCount,
+            isStationary = isStationaryWindow
         )
     }
 

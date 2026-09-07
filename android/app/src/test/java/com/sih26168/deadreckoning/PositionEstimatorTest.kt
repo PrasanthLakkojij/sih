@@ -5,8 +5,10 @@ import com.sih26168.deadreckoning.engine.PositionEstimator
 import com.sih26168.deadreckoning.ml.ICorrectionModel
 import com.sih26168.deadreckoning.physics.PhysicsDeadReckoning
 import com.sih26168.deadreckoning.sensor.IMUSensorCollector
+import com.sih26168.deadreckoning.test.SyntheticStationaryData
 import com.sih26168.deadreckoning.test.TestWindow0Data
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
@@ -89,30 +91,80 @@ class PositionEstimatorTest {
     }
 
     @Test
-    fun testConsecutiveLivePositionUpdates() {
+    fun testStationaryWindowZeroDisplacement() {
         println("\n================================================================================")
-        println("STEP 3c SIMULATION: Consecutive Live Position Updates (Simulated Walking North)")
+        println("VERIFICATION: Stationary Window ZUPT Gating (Zero Drift & Correction Skipped)")
         println("================================================================================")
 
-        // Mock model that predicts 12.6m displacement per 9-second segment (1.4 m/s walking speed)
-        val mockModel = ICorrectionModel { 12.6f }
+        var modelPredictCalled = false
+        val mockModel = ICorrectionModel {
+            modelPredictCalled = true
+            55.0f // Should NOT be called when stationary
+        }
         val estimator = PositionEstimator(mockModel)
-        estimator.resetState(x = 0.0f, y = 0.0f, heading = 0.0f, velocity = 1.4f) // Heading North (0 rad), walking speed 1.4 m/s
+        estimator.resetState(x = 0.0f, y = 0.0f, heading = 0.0f, velocity = 0.0f)
+
+        val state = estimator.estimatePosition(
+            accX = SyntheticStationaryData.acc_x,
+            accY = SyntheticStationaryData.acc_y,
+            accZ = SyntheticStationaryData.acc_z,
+            accLinX = SyntheticStationaryData.acc_lin_x,
+            accLinY = SyntheticStationaryData.acc_lin_y,
+            accLinZ = SyntheticStationaryData.acc_lin_z,
+            gyroX = SyntheticStationaryData.gyro_x,
+            gyroY = SyntheticStationaryData.gyro_y,
+            gyroZ = SyntheticStationaryData.gyro_z,
+            accVehFwd = SyntheticStationaryData.acc_veh_fwd,
+            gyroVehYawRate = SyntheticStationaryData.gyro_veh_yaw_rate,
+            dtArr = SyntheticStationaryData.dt_sec,
+            segDurS = SyntheticStationaryData.SEG_DUR_S
+        )
+
+        println("Stationary Window Results:")
+        println("  isStationary  : ${state.isStationary}")
+        println("  deltaS_imu    : ${state.deltaS_imu} m")
+        println("  deltaS_corr   : ${state.deltaS_corr} m")
+        println("  deltaS_final  : ${state.deltaS_final} m")
+        println("  effectiveSpeed: ${state.effectiveSpeed * 3.6f} km/h")
+        println("  Model called  : $modelPredictCalled")
+
+        assertTrue("ZUPT should flag window as stationary", state.isStationary)
+        assertFalse("ML model predict must NOT be called when stationary", modelPredictCalled)
+        assertEquals(0.0f, state.deltaS_corr, 0.0f)
+        assertTrue("deltaS_imu must be near zero (< 0.01m)", state.deltaS_imu < 0.01f)
+        assertTrue("deltaS_final must be near zero (< 0.01m)", state.deltaS_final < 0.01f)
+        assertEquals(0.0f, state.x, 0.01f)
+        assertEquals(0.0f, state.y, 0.01f)
+        assertEquals(0.0f, state.effectiveSpeed, 0.01f)
+    }
+
+    @Test
+    fun testConsecutiveStationaryWindows() {
+        println("\n================================================================================")
+        println("VERIFICATION: 3 Consecutive Stationary Windows (Simulated Standing Still 27s)")
+        println("================================================================================")
+
+        var modelCallCount = 0
+        val mockModel = ICorrectionModel {
+            modelCallCount++
+            12.6f
+        }
+        val estimator = PositionEstimator(mockModel)
+        estimator.resetState(x = 0.0f, y = 0.0f, heading = 0.0f, velocity = 0.0f)
 
         val nSamples = 91
         val dtNs = 100_000_000L // 10Hz = 100ms
-
-        // Simulate 3 consecutive 9-second walking windows heading North
         var currentTimeNs = 1_000_000_000L
+
         for (w in 1..3) {
             val samples = mutableListOf<IMUSensorCollector.Sample>()
             for (i in 0 until nSamples) {
                 samples.add(
                     IMUSensorCollector.Sample(
-                        accX = 0f, accY = 0f, accZ = 9.81f,
-                        accLinX = 0f, accLinY = 0f, accLinZ = 0f,
-                        gyroX = 0f, gyroY = 0f, gyroZ = 0f,
-                        accVehFwd = 0f, gyroVehYawRate = 0f,
+                        accX = 0.01f, accY = -0.01f, accZ = 9.81f,
+                        accLinX = 0.01f, accLinY = -0.01f, accLinZ = 0.02f,
+                        gyroX = 0.001f, gyroY = -0.001f, gyroZ = 0.002f,
+                        accVehFwd = 0.005f, gyroVehYawRate = 0.001f,
                         timestampNs = currentTimeNs
                     )
                 )
@@ -120,17 +172,63 @@ class PositionEstimatorTest {
             }
 
             val state = estimator.estimatePosition(samples)
-            println("Window #$w (t=${w * 9}s): x=${String.format("%.2f", state.x)}m, y=${String.format("%.2f", state.y)}m, " +
-                    "heading=${String.format("%.1f", state.headingDeg)}°, v=${String.format("%.2f", state.velocity)}m/s, " +
+            println("Stationary Window #$w (t=${w * 9}s): x=${String.format("%.2f", state.x)}m, y=${String.format("%.2f", state.y)}m, " +
+                    "isStationary=${state.isStationary}, v=${String.format("%.2f", state.effectiveSpeed * 3.6f)}km/h, " +
+                    "Δs_imu=${String.format("%.4f", state.deltaS_imu)}m, Δs_corr=${String.format("%.2f", state.deltaS_corr)}m, " +
+                    "Δs_final=${String.format("%.4f", state.deltaS_final)}m")
+
+            assertTrue("Window #$w must be flagged stationary", state.isStationary)
+            assertEquals(0.0f, state.deltaS_corr, 0.0f)
+            assertTrue("Window #$w Δs_final must be < 0.01m", state.deltaS_final < 0.01f)
+            assertEquals(0.0f, state.x, 0.01f)
+            assertEquals(0.0f, state.y, 0.01f)
+            assertEquals(0.0f, state.effectiveSpeed, 0.01f)
+        }
+
+        assertEquals("Model predict should never be called across all stationary windows", 0, modelCallCount)
+        println(">>> CONSECUTIVE STATIONARY TRACKING SIMULATION PASSED! ZERO DRIFT MAINTAINED! <<<")
+    }
+
+    @Test
+    fun testConsecutiveMovingWindows() {
+        println("\n================================================================================")
+        println("STEP 3c SIMULATION: Consecutive Moving Windows (Simulated Driving/Moving)")
+        println("================================================================================")
+
+        // Mock model that predicts 12.6m displacement per 9-second segment
+        val mockModel = ICorrectionModel { 12.6f }
+        val estimator = PositionEstimator(mockModel)
+        estimator.resetState(x = 0.0f, y = 0.0f, heading = 0.0f, velocity = 1.4f)
+
+        val nSamples = 91
+        val dtNs = 100_000_000L // 10Hz = 100ms
+        var currentTimeNs = 1_000_000_000L
+
+        for (w in 1..3) {
+            val samples = mutableListOf<IMUSensorCollector.Sample>()
+            for (i in 0 until nSamples) {
+                samples.add(
+                    IMUSensorCollector.Sample(
+                        accX = 0f, accY = 0f, accZ = 9.81f,
+                        accLinX = 6.0f, accLinY = 0.5f, accLinZ = 0.2f, // Linear acceleration above locked A_TH = 5.389 m/s^2
+                        gyroX = 0.1f, gyroY = 0.1f, gyroZ = 0.0f,
+                        accVehFwd = 0.5f, gyroVehYawRate = 0f, // Active forward acceleration
+                        timestampNs = currentTimeNs
+                    )
+                )
+                currentTimeNs += dtNs
+            }
+
+            val state = estimator.estimatePosition(samples)
+            println("Moving Window #$w (t=${w * 9}s): x=${String.format("%.2f", state.x)}m, y=${String.format("%.2f", state.y)}m, " +
+                    "heading=${String.format("%.1f", state.headingDeg)}°, v=${String.format("%.2f", state.effectiveSpeed * 3.6f)}km/h, " +
                     "Δs_corr=${String.format("%.2f", state.deltaS_corr)}m, Δs_final=${String.format("%.2f", state.deltaS_final)}m")
 
-            // In Window 1, initial velocity v0=1.4m/s travels 0.84m in the first 0.6s before ZUPT confirms stationary
-            // Subsequent windows start with confirmed ZUPT, so displacement equals ML correction (12.6m)
-            assertEquals(0.0f, state.x, 0.01f)
-            assertTrue("Y should advance consistently North", state.y > (w - 1) * 12.0f)
-            val expectedY = if (w == 1) 13.44f else 13.44f + (w - 1) * 12.6f
-            assertEquals(expectedY, state.y, 0.05f)
+            assertFalse("Moving window must NOT be stationary", state.isStationary)
+            assertEquals(12.6f, state.deltaS_corr, 0.01f)
+            assertTrue("Δs_final must include physics + ML correction (> 12.6m)", state.deltaS_final > 12.6f)
+            assertTrue("Y coordinate must advance North", state.y > 0.0f)
         }
-        println(">>> CONSECUTIVE POSITION TRACKING SIMULATION PASSED! <<<")
+        println(">>> CONSECUTIVE MOVING TRACKING SIMULATION PASSED! <<<")
     }
 }

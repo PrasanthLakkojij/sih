@@ -32,7 +32,9 @@ data class NavigationState(
     val deltaS_corr: Float,
     val deltaS_final: Float,
     val headingDir: Float,
-    val headingDirDeg: Float
+    val headingDirDeg: Float,
+    val isStationary: Boolean = false,
+    val effectiveSpeed: Float = 0.0f
 )
 
 /**
@@ -127,37 +129,42 @@ class PositionEstimator(
             updateInternalState = true
         )
 
-        // 2. Extract 58 features matching Phase 8/9 training
-        val features = FeatureExtractor.extractFeatures(
-            accX = accX,
-            accY = accY,
-            accZ = accZ,
-            accLinX = accLinX,
-            accLinY = accLinY,
-            accLinZ = accLinZ,
-            gyroX = gyroX,
-            gyroY = gyroY,
-            gyroZ = gyroZ,
-            accVehFwd = accVehFwd,
-            gyroVehYawRate = gyroVehYawRate,
-            segDurS = duration,
-            nSamp = nSamples
-        )
+        // 2. Combine physics displacement and ML correction with ZUPT gating
+        val (deltaS_corr, correctedDeltaS) = if (physResult.isStationary) {
+            // ZUPT active (device did not move): skip ML prediction and set correction to 0
+            Pair(0.0f, physResult.deltaS_imu)
+        } else {
+            // Moving window: extract 58 features and predict displacement correction
+            val features = FeatureExtractor.extractFeatures(
+                accX = accX,
+                accY = accY,
+                accZ = accZ,
+                accLinX = accLinX,
+                accLinY = accLinY,
+                accLinZ = accLinZ,
+                gyroX = gyroX,
+                gyroY = gyroY,
+                gyroZ = gyroZ,
+                accVehFwd = accVehFwd,
+                gyroVehYawRate = gyroVehYawRate,
+                segDurS = duration,
+                nSamp = nSamples
+            )
+            val corr = correctionModel.predict(features)
+            Pair(corr, max(0.0f, physResult.deltaS_imu + corr))
+        }
 
-        // 3. Predict displacement correction with ONNX model
-        val deltaS_corr = correctionModel.predict(features)
+        // 3. Compute real speed from actual applied position delta over window duration
+        val effectiveSpeedMs = if (duration > 0f) (correctedDeltaS / duration) else physResult.newVelocity
 
-        // 4. Corrected displacement (clamped to >= 0, matching estimate_position.py)
-        val correctedDeltaS = max(0.0f, physResult.deltaS_imu + deltaS_corr)
-
-        // 5. Update position coordinates (East = x, North = y) using motion direction hDir
+        // 4. Update position coordinates (East = x, North = y) using motion direction hDir
         val newX = currentX + correctedDeltaS * sin(physResult.headingDir)
         val newY = currentY + correctedDeltaS * cos(physResult.headingDir)
 
         currentX = newX
         currentY = newY
         currentHeading = physResult.newHeading
-        currentVelocity = physResult.newVelocity
+        currentVelocity = if (physResult.isStationary) 0.0f else effectiveSpeedMs
 
         return NavigationState(
             x = newX,
@@ -169,7 +176,9 @@ class PositionEstimator(
             deltaS_corr = deltaS_corr,
             deltaS_final = correctedDeltaS,
             headingDir = physResult.headingDir,
-            headingDirDeg = physResult.headingDirDeg
+            headingDirDeg = physResult.headingDirDeg,
+            isStationary = physResult.isStationary,
+            effectiveSpeed = effectiveSpeedMs
         )
     }
 

@@ -362,20 +362,27 @@ class MainActivity : AppCompatActivity() {
         val gps = lastGpsLocation
         val (driftM, driftPct) = computeDriftMetrics()
 
+        val corrLogStr = if (navState.isStationary) {
+            "0.00m (skipped -- ZUPT active)"
+        } else {
+            "${String.format("%.2f", navState.deltaS_corr)}m"
+        }
+
         if (isGpsOutageMode) {
             val elapsedS = (System.currentTimeMillis() - outageStartTimeMs) / 1000f
             val logMsg = "[GPS_LOST_MODE] Window #$windowCount (Outage: ${String.format("%.1f", elapsedS)}s) | " +
                     "True GPS: (${String.format("%.6f", gps?.latitude ?: 0.0)}, ${String.format("%.6f", gps?.longitude ?: 0.0)}) | " +
                     "AI-DR: (${String.format("%.6f", aiLat)}, ${String.format("%.6f", aiLon)}) | " +
                     "Outage Drift: ${String.format("%.1f", driftM)}m (${String.format("%.2f", driftPct)}%) | " +
-                    "dS_imu: ${String.format("%.2f", navState.deltaS_imu)}m | dS_corr: ${String.format("%.2f", navState.deltaS_corr)}m | " +
+                    "dS_imu: ${String.format("%.2f", navState.deltaS_imu)}m | dS_corr: $corrLogStr | " +
                     "dS_final: ${String.format("%.2f", navState.deltaS_final)}m"
             Log.i(TAG_POSITION, logMsg)
         } else {
             val logMsg = "GPS: (${String.format("%.6f", gps?.latitude ?: 0.0)}, ${String.format("%.6f", gps?.longitude ?: 0.0)}) | " +
                     "AI: (${String.format("%.6f", aiLat)}, ${String.format("%.6f", aiLon)}) | " +
                     "Drift: ${String.format("%.1f", driftM)}m (${String.format("%.2f", driftPct)}%) | " +
-                    "dS_imu: ${String.format("%.2f", navState.deltaS_imu)}m | dS_corr: ${String.format("%.2f", navState.deltaS_corr)}m"
+                    "dS_imu: ${String.format("%.2f", navState.deltaS_imu)}m | dS_corr: $corrLogStr | " +
+                    "dS_final: ${String.format("%.2f", navState.deltaS_final)}m"
             Log.i(TAG_POSITION, logMsg)
         }
 
@@ -392,8 +399,8 @@ class MainActivity : AppCompatActivity() {
             aiPolyline?.addPoint(targetGeoPoint)
             mapView.invalidate()
 
-            // Update HUD text
-            val aiSpeedKmh = navState.velocity * 3.6f
+            // Update HUD text using real effective speed derived from actual position delta
+            val aiSpeedKmh = navState.effectiveSpeed * 3.6f
             tvAiCoords.text = "Lat: ${String.format("%.5f", aiLat)}\nLon: ${String.format("%.5f", aiLon)}"
             tvAiMotion.text = "Speed: ${String.format("%.1f", aiSpeedKmh)} km/h | ψ: ${String.format("%.1f", navState.headingDeg)}°"
             tvWindowCount.text = "Window #$windowCount (Δs=${String.format("%.1f", navState.deltaS_final)}m)"

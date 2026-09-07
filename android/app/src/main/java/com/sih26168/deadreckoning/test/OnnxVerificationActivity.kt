@@ -302,6 +302,50 @@ class OnnxVerificationActivity : AppCompatActivity() {
                 appendLog("  Result: FAILED")
             }
 
+            // 5. Step 3d: Stationary Window ZUPT-Gated Verification
+            appendLog("\n==================================================")
+            appendLog("STEP 3d: STATIONARY WINDOW ZUPT-GATED VERIFICATION")
+            appendLog("==================================================")
+
+            fullEstimator.resetState(
+                x = SyntheticStationaryData.INITIAL_X,
+                y = SyntheticStationaryData.INITIAL_Y,
+                heading = SyntheticStationaryData.INITIAL_HEADING_RAD,
+                velocity = SyntheticStationaryData.INITIAL_VELOCITY
+            )
+
+            val statState = fullEstimator.estimatePosition(
+                accX = SyntheticStationaryData.acc_x,
+                accY = SyntheticStationaryData.acc_y,
+                accZ = SyntheticStationaryData.acc_z,
+                accLinX = SyntheticStationaryData.acc_lin_x,
+                accLinY = SyntheticStationaryData.acc_lin_y,
+                accLinZ = SyntheticStationaryData.acc_lin_z,
+                gyroX = SyntheticStationaryData.gyro_x,
+                gyroY = SyntheticStationaryData.gyro_y,
+                gyroZ = SyntheticStationaryData.gyro_z,
+                accVehFwd = SyntheticStationaryData.acc_veh_fwd,
+                gyroVehYawRate = SyntheticStationaryData.gyro_veh_yaw_rate,
+                dtArr = SyntheticStationaryData.dt_sec,
+                segDurS = SyntheticStationaryData.SEG_DUR_S
+            )
+
+            appendLog("Stationary Window Output:")
+            appendLog("  isStationary : ${statState.isStationary} (Expected: true)")
+            appendLog("  Δs_imu       : ${String.format("%.4f", statState.deltaS_imu)} m (Expected: ~0.00m)")
+            appendLog("  Δs_corr      : ${String.format("%.4f", statState.deltaS_corr)} m (Expected: 0.0000m - skipped)")
+            appendLog("  Δs_final     : ${String.format("%.4f", statState.deltaS_final)} m (Expected: ~0.00m)")
+            appendLog("  speed        : ${String.format("%.2f", statState.effectiveSpeed * 3.6f)} km/h (Expected: 0.00 km/h)")
+
+            val statPass = statState.isStationary && statState.deltaS_corr == 0.0f && statState.deltaS_final < 0.02f
+            if (statPass) {
+                Log.i(TAG_POSITION, ">>> STATIONARY ZUPT-GATED VERIFICATION: PASSED <<<")
+                appendLog("  Result: PASSED (ZUPT active, ML correction gated to 0.00m, Δs_final < 0.02m)")
+            } else {
+                Log.e(TAG_POSITION, ">>> STATIONARY ZUPT-GATED VERIFICATION: FAILED <<<")
+                appendLog("  Result: FAILED")
+            }
+
         } catch (e: Exception) {
             Log.e(TAG_FEATURE, "Verification error: ${e.message}", e)
             appendLog("ERROR: ${e.message}")
@@ -326,10 +370,12 @@ class OnnxVerificationActivity : AppCompatActivity() {
         val est = positionEstimator ?: return
         val state = est.estimatePosition(samples)
 
+        val corrStr = if (state.isStationary) "0.00m (skipped -- ZUPT active)" else "${String.format("%.2f", state.deltaS_corr)}m"
+        val speedKmh = state.effectiveSpeed * 3.6f
         val logMsg = "Live Window #$liveWindowCount (N=${samples.size}): " +
                 "x=${String.format("%.2f", state.x)}m, y=${String.format("%.2f", state.y)}m, " +
-                "heading=${String.format("%.1f", state.headingDeg)}°, v=${String.format("%.2f", state.velocity)}m/s, " +
-                "Δs_imu=${String.format("%.2f", state.deltaS_imu)}m, Δs_corr=${String.format("%.2f", state.deltaS_corr)}m, " +
+                "heading=${String.format("%.1f", state.headingDeg)}°, v=${String.format("%.2f", speedKmh)}km/h, " +
+                "Δs_imu=${String.format("%.2f", state.deltaS_imu)}m, Δs_corr=$corrStr, " +
                 "Δs_final=${String.format("%.2f", state.deltaS_final)}m"
 
         Log.i(TAG_POSITION, logMsg)
