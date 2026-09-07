@@ -1,17 +1,25 @@
 package com.sih26168.deadreckoning.ui
 
 import android.Manifest
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.location.Location
 import android.os.Bundle
+import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.View
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.animation.LinearInterpolator
 import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import com.google.android.gms.location.FusedLocationProviderClient
@@ -30,6 +38,7 @@ import com.google.android.gms.maps.model.Marker
 import com.google.android.gms.maps.model.MarkerOptions
 import com.google.android.gms.maps.model.Polyline
 import com.google.android.gms.maps.model.PolylineOptions
+import com.google.android.material.button.MaterialButton
 import com.sih26168.deadreckoning.R
 import com.sih26168.deadreckoning.engine.NavigationState
 import com.sih26168.deadreckoning.engine.PositionEstimator
@@ -37,24 +46,22 @@ import com.sih26168.deadreckoning.ml.CorrectionModel
 import com.sih26168.deadreckoning.sensor.IMUSensorCollector
 import com.sih26168.deadreckoning.test.OnnxVerificationActivity
 import com.sih26168.deadreckoning.util.GeoProjection
+import com.sih26168.deadreckoning.util.SphericalLatLonInterpolator
 import kotlin.math.sqrt
 
 /**
- * MainActivity: Live Dual-Marker Dead Reckoning Map Activity.
+ * MainActivity: Live Dual-Marker Dead Reckoning Map Activity with Simulated GPS Outage Mode.
  *
- * Features:
- * 1. Dual-marker tracking:
- *    - Blue marker / GPS path: Genuine GNSS fix from phone GPS.
- *    - Orange marker / AI path: Physics + AI ML dead reckoning from PositionEstimator.
- * 2. Origin Alignment:
- *    - Initial GPS fix sets origin reference point (lat0, lon0).
- *    - PositionEstimator state starts at (x=0, y=0) relative to this origin.
- * 3. Smooth Animation:
- *    - Marker position animates smoothly over ~1.0s between 9-second window updates.
- * 4. Real-time Path History:
- *    - Dual polylines (Blue GPS vs Orange AI) display trajectory agreement and drift.
- * 5. Telemetry HUD:
- *    - Real-time display of coordinates, speed, heading, and GPS-AI separation.
+ * Implements SIH26168 core Level 1 capability:
+ *  1. Normal GPS Active Mode: Genuine GPS drives primary position; AI-DR estimates in background.
+ *  2. Simulated GPS Loss Mode:
+ *     - PositionEstimator state is cleanly snapped to true GPS at instant of toggle.
+ *     - AI-DR becomes the authoritative primary position displayed to the user.
+ *     - Real GPS is tracked faintly in background as ground truth comparison.
+ *     - HUD tracks live outage duration, accumulated distance, and drift.
+ *  3. Resync to GPS Active:
+ *     - Smooth spherical interpolation (1.8s) transitions marker without teleportation.
+ *     - Logs correction distance and outage metrics to SIH_POSITION_TEST.
  */
 class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -81,6 +88,13 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private var totalDistanceTraveledM: Float = 0.0f
     private var windowCount = 0
 
+    // Outage Simulation State
+    private var isGpsOutageMode = false
+    private var outageStartTimeMs: Long = 0L
+    private var outageDistanceTraveledM: Float = 0.0f
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private var outageTimerRunnable: Runnable? = null
+
     // Map Markers & Polylines
     private var gpsMarker: Marker? = null
     private var aiMarker: Marker? = null
@@ -90,12 +104,17 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     private val aiTrail = mutableListOf<LatLng>()
 
     // UI Views
+    private lateinit var tvGpsStatusBadge: TextView
+    private lateinit var llOutageBanner: LinearLayout
+    private lateinit var tvOutageBannerText: TextView
+    private lateinit var tvOutageTimer: TextView
     private lateinit var tvGpsCoords: TextView
     private lateinit var tvGpsSpeed: TextView
     private lateinit var tvAiCoords: TextView
     private lateinit var tvAiMotion: TextView
     private lateinit var tvDriftDistance: TextView
     private lateinit var tvWindowCount: TextView
+    private lateinit var btnToggleGpsOutage: MaterialButton
     private lateinit var btnResetOrigin: Button
     private lateinit var btnVerifyTests: Button
 
@@ -104,14 +123,23 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         setContentView(R.layout.activity_main)
 
         // Bind UI Views
+        tvGpsStatusBadge = findViewById(R.id.tvGpsStatusBadge)
+        llOutageBanner = findViewById(R.id.llOutageBanner)
+        tvOutageBannerText = findViewById(R.id.tvOutageBannerText)
+        tvOutageTimer = findViewById(R.id.tvOutageTimer)
         tvGpsCoords = findViewById(R.id.tvGpsCoords)
         tvGpsSpeed = findViewById(R.id.tvGpsSpeed)
         tvAiCoords = findViewById(R.id.tvAiCoords)
         tvAiMotion = findViewById(R.id.tvAiMotion)
         tvDriftDistance = findViewById(R.id.tvDriftDistance)
         tvWindowCount = findViewById(R.id.tvWindowCount)
+        btnToggleGpsOutage = findViewById(R.id.btnToggleGpsOutage)
         btnResetOrigin = findViewById(R.id.btnResetOrigin)
         btnVerifyTests = findViewById(R.id.btnVerifyTests)
+
+        btnToggleGpsOutage.setOnClickListener {
+            toggleGpsOutageMode()
+        }
 
         btnResetOrigin.setOnClickListener {
             resetOriginToCurrentLocation()
@@ -229,7 +257,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                 velocity = location.speed
             )
 
-            // Setup GPS Marker
+            // Setup GPS Marker (Primary initially)
             gpsMarker = googleMap?.addMarker(
                 MarkerOptions()
                     .position(latLng)
@@ -237,18 +265,23 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
                     .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE))
             )
 
-            // Setup AI Predicted Marker at same initial origin
+            // Setup AI Predicted Marker (Secondary initially)
             aiMarker = googleMap?.addMarker(
                 MarkerOptions()
                     .position(latLng)
                     .title("Physics + AI Estimated")
                     .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_ORANGE))
+                    .alpha(0.85f)
             )
 
             googleMap?.animateCamera(CameraUpdateFactory.newLatLngZoom(latLng, DEFAULT_ZOOM))
         } else {
             // Update GPS marker position
             gpsMarker?.position = latLng
+            if (!isGpsOutageMode) {
+                // In GPS Active mode, camera follows genuine GPS
+                googleMap?.animateCamera(CameraUpdateFactory.newLatLng(latLng))
+            }
         }
 
         // 2. Append to GPS trail
@@ -276,22 +309,43 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         val navState = positionEstimator.estimatePosition(samples)
         lastAiState = navState
         totalDistanceTraveledM += navState.deltaS_final
+        if (isGpsOutageMode) {
+            outageDistanceTraveledM += navState.deltaS_final
+        }
 
         // 2. Convert local ENU (meters) back to LatLng using exact inverse projection
         val (aiLat, aiLon) = GeoProjection.enuToLatLon(navState.x, navState.y, oLat, oLon)
         val targetLatLng = LatLng(aiLat, aiLon)
 
         // 3. Log to Logcat with tag SIH_POSITION_TEST
-        val logMsg = "Window #$windowCount: x=${String.format("%.2f", navState.x)}m, y=${String.format("%.2f", navState.y)}m, " +
-                "lat=${String.format("%.6f", aiLat)}, lon=${String.format("%.6f", aiLon)}, " +
-                "heading=${String.format("%.1f", navState.headingDeg)}°, v=${String.format("%.2f", navState.velocity)}m/s, " +
-                "Δs_imu=${String.format("%.2f", navState.deltaS_imu)}m, Δs_corr=${String.format("%.2f", navState.deltaS_corr)}m, " +
-                "Δs_final=${String.format("%.2f", navState.deltaS_final)}m"
-        Log.i(TAG_POSITION, logMsg)
+        val gps = lastGpsLocation
+        val (driftM, driftPct) = computeDriftMetrics()
+
+        if (isGpsOutageMode) {
+            val elapsedS = (System.currentTimeMillis() - outageStartTimeMs) / 1000f
+            val logMsg = "[GPS_LOST_MODE] Window #$windowCount (Outage: ${String.format("%.1f", elapsedS)}s) | " +
+                    "True GPS: (${String.format("%.6f", gps?.latitude ?: 0.0)}, ${String.format("%.6f", gps?.longitude ?: 0.0)}) | " +
+                    "AI-DR: (${String.format("%.6f", aiLat)}, ${String.format("%.6f", aiLon)}) | " +
+                    "Outage Drift: ${String.format("%.1f", driftM)}m (${String.format("%.2f", driftPct)}%) | " +
+                    "dS_imu: ${String.format("%.2f", navState.deltaS_imu)}m | dS_corr: ${String.format("%.2f", navState.deltaS_corr)}m | " +
+                    "dS_final: ${String.format("%.2f", navState.deltaS_final)}m"
+            Log.i(TAG_POSITION, logMsg)
+        } else {
+            val logMsg = "GPS: (${String.format("%.6f", gps?.latitude ?: 0.0)}, ${String.format("%.6f", gps?.longitude ?: 0.0)}) | " +
+                    "AI: (${String.format("%.6f", aiLat)}, ${String.format("%.6f", aiLon)}) | " +
+                    "Drift: ${String.format("%.1f", driftM)}m (${String.format("%.2f", driftPct)}%) | " +
+                    "dS_imu: ${String.format("%.2f", navState.deltaS_imu)}m | dS_corr: ${String.format("%.2f", navState.deltaS_corr)}m"
+            Log.i(TAG_POSITION, logMsg)
+        }
 
         // 4. Smoothly animate AI Marker to new position over 1.0 second
         runOnUiThread {
             animateMarkerTo(aiMarker, targetLatLng, durationMs = 1000L)
+
+            // If in GPS Lost mode, AI DR is authoritative; camera centers on AI position
+            if (isGpsOutageMode) {
+                googleMap?.animateCamera(CameraUpdateFactory.newLatLng(targetLatLng))
+            }
 
             // Append to AI Trail
             aiTrail.add(targetLatLng)
@@ -308,7 +362,137 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     /**
-     * Animates marker smoothly between coordinates over durationMs.
+     * Toggles between GPS Active and GPS Lost (Simulated) Dead Reckoning mode.
+     */
+    private fun toggleGpsOutageMode() {
+        val gps = lastGpsLocation
+        val oLat = originLat
+        val oLon = originLon
+
+        if (gps == null || oLat == null || oLon == null) {
+            Toast.makeText(this, "Waiting for initial GPS fix...", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (!isGpsOutageMode) {
+            // =========================================================================
+            // TRANSITION TO: GPS LOST (SIMULATED OUTAGE)
+            // =========================================================================
+            isGpsOutageMode = true
+            outageStartTimeMs = System.currentTimeMillis()
+            outageDistanceTraveledM = 0.0f
+
+            // 1. CRITICAL: Clean snap of PositionEstimator state to true current GPS values
+            //    (Replicates exact Phase 6/Phase 9 Python outage initialization)
+            val (gpsEast, gpsNorth) = GeoProjection.latLonToEnu(gps.latitude, gps.longitude, oLat, oLon)
+            val trueBearingRad = Math.toRadians(gps.bearing.toDouble()).toFloat()
+            val trueVelocity = gps.speed
+
+            positionEstimator.resetState(
+                x = gpsEast.toFloat(),
+                y = gpsNorth.toFloat(),
+                heading = trueBearingRad,
+                velocity = trueVelocity
+            )
+
+            // Snap AI marker exactly to current GPS position at start of outage
+            val currentGpsLatLng = LatLng(gps.latitude, gps.longitude)
+            aiMarker?.position = currentGpsLatLng
+
+            // 2. Visual Differentiation: AI Marker becomes primary; GPS marker becomes faint background ground truth
+            aiMarker?.alpha = 1.0f
+            aiMarker?.title = "PRIMARY: AI Dead Reckoning (Authoritative)"
+            gpsMarker?.alpha = 0.35f
+            gpsMarker?.title = "Ground Truth Reference (GPS - Inactive)"
+
+            // 3. Update Controls & HUD
+            btnToggleGpsOutage.text = "RESTORE GPS SIGNAL"
+            btnToggleGpsOutage.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#2E7D32")) // Green
+            btnToggleGpsOutage.setIconResource(android.R.drawable.ic_menu_compass)
+
+            tvGpsStatusBadge.text = "MODE: GPS LOST - AI DR"
+            tvGpsStatusBadge.setBackgroundColor(Color.parseColor("#D32F2F")) // Red
+
+            llOutageBanner.visibility = View.VISIBLE
+            tvOutageBannerText.text = "⚠️ GPS LOST: AI ESTIMATING"
+            tvOutageTimer.text = "Outage: 0.0s"
+
+            // Start 1Hz UI ticker to update outage elapsed duration in real-time
+            startOutageTimerTicker()
+
+            Log.i(TAG_POSITION, "GPS OUTAGE SIMULATED: State cleanly snapped to GPS (lat=${gps.latitude}, lon=${gps.longitude}, speed=${trueVelocity}m/s, heading=${gps.bearing}°)")
+            Toast.makeText(this, "GNSS Outage Simulated: AI Dead Reckoning is now Authoritative", Toast.LENGTH_SHORT).show()
+
+        } else {
+            // =========================================================================
+            // TRANSITION TO: GPS ACTIVE (SMOOTH RESYNCHRONIZATION)
+            // =========================================================================
+            stopOutageTimerTicker()
+
+            val aiCurrentLatLng = aiMarker?.position ?: LatLng(gps.latitude, gps.longitude)
+            val realGpsLatLng = LatLng(gps.latitude, gps.longitude)
+            val elapsedOutageS = (System.currentTimeMillis() - outageStartTimeMs) / 1000f
+
+            // Compute Euclidean correction distance in meters
+            val results = FloatArray(1)
+            Location.distanceBetween(
+                aiCurrentLatLng.latitude, aiCurrentLatLng.longitude,
+                realGpsLatLng.latitude, realGpsLatLng.longitude,
+                results
+            )
+            val correctionDistanceM = results[0]
+
+            // Log transition metrics immediately as required by Step 5
+            Log.i(
+                TAG_POSITION,
+                "RESYNC: AI-DR pos: (${String.format("%.6f", aiCurrentLatLng.latitude)}, ${String.format("%.6f", aiCurrentLatLng.longitude)}) | " +
+                        "Real GPS: (${String.format("%.6f", realGpsLatLng.latitude)}, ${String.format("%.6f", realGpsLatLng.longitude)}) | " +
+                        "Correction Distance: ${String.format("%.2f", correctionDistanceM)}m | " +
+                        "Outage Duration: ${String.format("%.1f", elapsedOutageS)}s"
+            )
+
+            // Update UI to indicate resynchronization in progress
+            tvGpsStatusBadge.text = "RESYNCING..."
+            tvGpsStatusBadge.setBackgroundColor(Color.parseColor("#F57C00")) // Orange
+            tvOutageBannerText.text = "🔄 RESYNCING: Correcting ${String.format("%.1f", correctionDistanceM)}m drift..."
+
+            // Smoothly animate the AI marker from its DR position to the true GPS position over 1.8 seconds
+            animateResync(aiMarker, aiCurrentLatLng, realGpsLatLng, durationMs = 1800L) {
+                // On animation completion:
+                isGpsOutageMode = false
+
+                // Restore primary/secondary marker styling
+                gpsMarker?.alpha = 1.0f
+                gpsMarker?.title = "Primary: Real GPS Location"
+                aiMarker?.alpha = 0.85f
+                aiMarker?.title = "Secondary: AI DR Estimate"
+
+                // Re-align PositionEstimator to current GPS position for clean continuous tracking
+                val (gpsEast, gpsNorth) = GeoProjection.latLonToEnu(gps.latitude, gps.longitude, oLat, oLon)
+                positionEstimator.resetState(
+                    x = gpsEast.toFloat(),
+                    y = gpsNorth.toFloat(),
+                    heading = Math.toRadians(gps.bearing.toDouble()).toFloat(),
+                    velocity = gps.speed
+                )
+
+                // Restore controls & HUD
+                btnToggleGpsOutage.text = "SIMULATE GPS LOSS"
+                btnToggleGpsOutage.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#D32F2F")) // Red
+                btnToggleGpsOutage.setIconResource(android.R.drawable.ic_dialog_alert)
+
+                tvGpsStatusBadge.text = "MODE: LIVE GPS"
+                tvGpsStatusBadge.setBackgroundColor(Color.parseColor("#2E7D32")) // Green
+                llOutageBanner.visibility = View.GONE
+
+                googleMap?.animateCamera(CameraUpdateFactory.newLatLng(realGpsLatLng))
+                Toast.makeText(this@MainActivity, "GPS Restored: Smoothly resynced (${String.format("%.1f", correctionDistanceM)}m corrected)", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    /**
+     * Smoothly animates marker between LatLng coordinates using spherical linear interpolation.
      */
     private fun animateMarkerTo(marker: Marker?, targetLatLng: LatLng, durationMs: Long) {
         if (marker == null) return
@@ -319,37 +503,98 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
             interpolator = LinearInterpolator()
             addUpdateListener { animation ->
                 val fraction = animation.animatedFraction
-                val lat = startPos.latitude + fraction * (targetLatLng.latitude - startPos.latitude)
-                val lon = startPos.longitude + fraction * (targetLatLng.longitude - startPos.longitude)
-                marker.position = LatLng(lat, lon)
+                marker.position = SphericalLatLonInterpolator.interpolate(fraction, startPos, targetLatLng)
             }
             start()
         }
     }
 
     /**
-     * Computes the current separation distance between GPS and AI estimate in meters.
+     * Smoothly animates marker for resynchronization over 1.8s with ease-in-out easing.
      */
-    private fun updateSeparationAndDrift() {
-        val oLat = originLat ?: return
-        val oLon = originLon ?: return
-        val gps = lastGpsLocation ?: return
-        val ai = lastAiState ?: return
+    private fun animateResync(
+        marker: Marker?,
+        fromLatLng: LatLng,
+        toLatLng: LatLng,
+        durationMs: Long,
+        onComplete: () -> Unit
+    ) {
+        if (marker == null) {
+            onComplete()
+            return
+        }
 
-        // Convert current GPS location to local ENU relative to origin
+        ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = durationMs
+            interpolator = AccelerateDecelerateInterpolator()
+            addUpdateListener { animation ->
+                val fraction = animation.animatedFraction
+                marker.position = SphericalLatLonInterpolator.interpolate(fraction, fromLatLng, toLatLng)
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    marker.position = toLatLng
+                    onComplete()
+                }
+            })
+            start()
+        }
+    }
+
+    /**
+     * Starts 1Hz ticker to update outage elapsed duration and drift live on the HUD.
+     */
+    private fun startOutageTimerTicker() {
+        stopOutageTimerTicker()
+        outageTimerRunnable = object : Runnable {
+            override fun run() {
+                if (isGpsOutageMode) {
+                    val elapsedS = (System.currentTimeMillis() - outageStartTimeMs) / 1000f
+                    tvOutageTimer.text = "Outage: ${String.format("%.1f", elapsedS)}s"
+                    updateSeparationAndDrift()
+                    uiHandler.postDelayed(this, 500L)
+                }
+            }
+        }
+        uiHandler.post(outageTimerRunnable!!)
+    }
+
+    private fun stopOutageTimerTicker() {
+        outageTimerRunnable?.let { uiHandler.removeCallbacks(it) }
+        outageTimerRunnable = null
+    }
+
+    /**
+     * Computes the current separation/drift distance and percentage.
+     */
+    private fun computeDriftMetrics(): Pair<Float, Float> {
+        val oLat = originLat ?: return Pair(0.0f, 0.0f)
+        val oLon = originLon ?: return Pair(0.0f, 0.0f)
+        val gps = lastGpsLocation ?: return Pair(0.0f, 0.0f)
+        val ai = lastAiState ?: return Pair(0.0f, 0.0f)
+
         val (eGps, nGps) = GeoProjection.latLonToEnu(gps.latitude, gps.longitude, oLat, oLon)
-
         val dx = (eGps - ai.x).toDouble()
         val dy = (nGps - ai.y).toDouble()
         val separationM = sqrt(dx * dx + dy * dy).toFloat()
 
-        val driftPct = if (totalDistanceTraveledM > 1.0f) {
-            (separationM / totalDistanceTraveledM) * 100.0f
+        val distanceBasis = if (isGpsOutageMode) outageDistanceTraveledM else totalDistanceTraveledM
+        val driftPct = if (distanceBasis > 1.0f) {
+            (separationM / distanceBasis) * 100.0f
         } else {
             0.0f
         }
 
-        tvDriftDistance.text = "Separation: ${String.format("%.1f", separationM)} m (${String.format("%.2f", driftPct)}%)"
+        return Pair(separationM, driftPct)
+    }
+
+    /**
+     * Updates HUD display with current drift distance and percentage.
+     */
+    private fun updateSeparationAndDrift() {
+        val (separationM, driftPct) = computeDriftMetrics()
+        val label = if (isGpsOutageMode) "Outage Drift" else "Separation"
+        tvDriftDistance.text = "$label: ${String.format("%.1f", separationM)} m (${String.format("%.2f", driftPct)}%)"
     }
 
     private fun resetOriginToCurrentLocation() {
@@ -372,6 +617,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
         aiPolyline?.points = aiTrail
 
         totalDistanceTraveledM = 0.0f
+        outageDistanceTraveledM = 0.0f
         windowCount = 0
 
         tvAiCoords.text = "Lat: ${String.format("%.5f", gps.latitude)}\nLon: ${String.format("%.5f", gps.longitude)}"
@@ -384,6 +630,7 @@ class MainActivity : AppCompatActivity(), OnMapReadyCallback {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopOutageTimerTicker()
         fusedLocationClient.removeLocationUpdates(locationCallback)
         sensorCollector.stop()
         correctionModel.close()

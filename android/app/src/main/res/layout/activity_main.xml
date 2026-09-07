@@ -17,12 +17,12 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- Top Floating HUD Overlay -->
+    <!-- Top Floating HUD Telemetry Overlay -->
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/hudCard"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_margin="16dp"
+        android:layout_margin="14dp"
         app:cardBackgroundColor="#E6212121"
         app:cardCornerRadius="14dp"
         app:cardElevation="8dp"
@@ -36,9 +36,9 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="14dp">
+            android:padding="12dp">
 
-            <!-- Title & Outage Status -->
+            <!-- Title & Mode Status Badge -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -61,11 +61,43 @@
                     android:layout_height="wrap_content"
                     android:background="#2E7D32"
                     android:paddingStart="8dp"
-                    android:paddingTop="2dp"
+                    android:paddingTop="3dp"
                     android:paddingEnd="8dp"
-                    android:paddingBottom="2dp"
-                    android:text="GPS: ACTIVE"
+                    android:paddingBottom="3dp"
+                    android:text="MODE: LIVE GPS"
                     android:textColor="#FFFFFF"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <!-- Prominent Outage Alert Banner (Visible during outage) -->
+            <LinearLayout
+                android:id="@+id/llOutageBanner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:background="#B71C1C"
+                android:orientation="horizontal"
+                android:padding="6dp"
+                android:visibility="gone"
+                tools:visibility="visible">
+
+                <TextView
+                    android:id="@+id/tvOutageBannerText"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="⚠️ GPS LOST: AI ESTIMATING"
+                    android:textColor="#FFFFFF"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvOutageTimer"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Outage: 0.0s"
+                    android:textColor="#FFEB3B"
                     android:textSize="11sp"
                     android:textStyle="bold" />
             </LinearLayout>
@@ -73,8 +105,8 @@
             <View
                 android:layout_width="match_parent"
                 android:layout_height="1dp"
-                android:layout_marginTop="8dp"
-                android:layout_marginBottom="8dp"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="6dp"
                 android:background="#26FFFFFF" />
 
             <!-- Row 1: Real GPS vs AI-ML Dead Reckoning -->
@@ -86,15 +118,17 @@
 
                 <!-- Real GPS Column (Blue) -->
                 <LinearLayout
+                    android:id="@+id/llGpsColumn"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:orientation="vertical">
 
                     <TextView
+                        android:id="@+id/tvGpsHeaderLabel"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="🔵 Real GPS"
+                        android:text="🔵 Real GPS Fix"
                         android:textColor="#42A5F5"
                         android:textSize="12sp"
                         android:textStyle="bold" />
@@ -119,12 +153,14 @@
 
                 <!-- AI+Physics DR Column (Orange) -->
                 <LinearLayout
+                    android:id="@+id/llAiColumn"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:orientation="vertical">
 
                     <TextView
+                        android:id="@+id/tvAiHeaderLabel"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="🟠 AI + Physics DR"
@@ -154,11 +190,11 @@
             <View
                 android:layout_width="match_parent"
                 android:layout_height="1dp"
-                android:layout_marginTop="8dp"
-                android:layout_marginBottom="8dp"
+                android:layout_marginTop="6dp"
+                android:layout_marginBottom="6dp"
                 android:background="#26FFFFFF" />
 
-            <!-- Drift & Outage stats -->
+            <!-- Drift, Outage & Window stats -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -191,36 +227,58 @@
         android:id="@+id/bottomBar"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="16dp"
-        android:layout_marginEnd="16dp"
-        android:layout_marginBottom="24dp"
-        android:gravity="center"
-        android:orientation="horizontal"
+        android:layout_marginStart="14dp"
+        android:layout_marginEnd="14dp"
+        android:layout_marginBottom="20dp"
+        android:orientation="vertical"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent">
 
-        <Button
-            android:id="@+id/btnResetOrigin"
-            style="@style/Widget.MaterialComponents.Button"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="6dp"
-            android:layout_weight="1"
-            android:text="Reset Origin"
-            android:textSize="12sp"
-            app:backgroundTint="#37474F" />
+        <!-- Prominent Toggle Button: Simulate GPS Loss / Restore GPS -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnToggleGpsOutage"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:layout_marginBottom="8dp"
+            android:text="SIMULATE GPS LOSS"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            app:backgroundTint="#D32F2F"
+            app:cornerRadius="10dp"
+            app:elevation="6dp"
+            app:icon="@android:drawable/ic_dialog_alert"
+            app:iconGravity="textStart"
+            app:iconPadding="8dp" />
 
-        <Button
-            android:id="@+id/btnVerifyTests"
-            style="@style/Widget.MaterialComponents.Button"
-            android:layout_width="0dp"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="6dp"
-            android:layout_weight="1"
-            android:text="Test Benchmarks"
-            android:textSize="12sp"
-            app:backgroundTint="#1565C0" />
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnResetOrigin"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="4dp"
+                android:layout_weight="1"
+                android:text="Reset Origin"
+                android:textSize="12sp"
+                app:backgroundTint="#37474F" />
+
+            <Button
+                android:id="@+id/btnVerifyTests"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:layout_weight="1"
+                android:text="Benchmarks"
+                android:textSize="12sp"
+                app:backgroundTint="#1565C0" />
+        </LinearLayout>
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>
