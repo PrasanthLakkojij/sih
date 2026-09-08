@@ -40,6 +40,8 @@ import com.sih26168.deadreckoning.engine.PositionEstimator
 import com.sih26168.deadreckoning.ml.CorrectionModel
 import com.sih26168.deadreckoning.sensor.IMUSensorCollector
 import com.sih26168.deadreckoning.test.OnnxVerificationActivity
+import com.sih26168.deadreckoning.mapmatching.LightweightMapMatcher
+import com.sih26168.deadreckoning.mapmatching.OverpassRoadProvider
 import com.sih26168.deadreckoning.util.GeoProjection
 import com.sih26168.deadreckoning.util.LatLng
 import com.sih26168.deadreckoning.util.SphericalLatLonInterpolator
@@ -106,6 +108,11 @@ class MainActivity : AppCompatActivity() {
     private var aiMarker: Marker? = null
     private var gpsPolyline: Polyline? = null
     private var aiPolyline: Polyline? = null
+
+    // Lightweight Map-Matching Layer (Display-only, isolated & revertable)
+    private var isMapMatchingEnabled = true
+    private lateinit var roadProvider: OverpassRoadProvider
+    private lateinit var mapMatcher: LightweightMapMatcher
 
     // UI Views
     private lateinit var tvGpsStatusBadge: TextView
@@ -190,6 +197,10 @@ class MainActivity : AppCompatActivity() {
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
         setupLocationCallback()
         checkLocationPermissionsAndStart()
+
+        // 7. Initialize Lightweight Map-Matching Layer (Display only)
+        roadProvider = OverpassRoadProvider(this)
+        mapMatcher = LightweightMapMatcher(roadSegments = roadProvider.getActiveSegments())
     }
 
     private fun setupOsmMapView() {
@@ -326,6 +337,9 @@ class MainActivity : AppCompatActivity() {
                 velocity = location.speed
             )
 
+            roadProvider.updateOrigin(location.latitude, location.longitude)
+            mapMatcher.roadSegments = roadProvider.getActiveSegments()
+
             gpsMarker?.position = geoPoint
             aiMarker?.position = geoPoint
 
@@ -361,6 +375,15 @@ class MainActivity : AppCompatActivity() {
         tvGpsSpeed.text = "Speed: ${String.format("%.1f", speedKmh)} km/h"
 
         updateSeparationAndDrift()
+
+        // 4. Asynchronously refresh nearby road network within ~300m in background
+        if (isMapMatchingEnabled) {
+            roadProvider.fetchRoadsAroundAsync(location.latitude, location.longitude, radiusM = 300.0) { success ->
+                if (success) {
+                    mapMatcher.roadSegments = roadProvider.getActiveSegments()
+                }
+            }
+        }
     }
 
     /**
@@ -382,7 +405,22 @@ class MainActivity : AppCompatActivity() {
             outageDistanceTraveledM += navState.deltaS_final
 
             val (aiLat, aiLon) = GeoProjection.enuToLatLon(navState.x, navState.y, oLat, oLon)
-            val targetGeoPoint = GeoPoint(aiLat, aiLon)
+            val rawGeoPoint = GeoPoint(aiLat, aiLon)
+
+            // Lightweight Map-Matching (DISPLAY LAYER ONLY - leaves navState and drift telemetry 100% untouched)
+            val displayGeoPoint = if (isMapMatchingEnabled) {
+                val snapResult = mapMatcher.snap(aiLat, aiLon, Math.toRadians(navState.headingDeg.toDouble()), oLat, oLon)
+                if (snapResult.isSnapped) {
+                    val mapMatchLog = "[MAP_MATCH] Window #$windowCount: SNAPPED by ${String.format("%.1f", snapResult.snapDistanceM)}m onto '${snapResult.matchedRoadName}' (heading diff: ${String.format("%.1f", snapResult.headingDiffDeg)}°) | Raw: (${String.format("%.6f", aiLat)}, ${String.format("%.6f", aiLon)}) -> Display: (${String.format("%.6f", snapResult.displayLat)}, ${String.format("%.6f", snapResult.displayLon)})"
+                    Log.i(TAG_POSITION, mapMatchLog)
+                    GeoPoint(snapResult.displayLat, snapResult.displayLon)
+                } else {
+                    Log.i(TAG_POSITION, "[MAP_MATCH] Window #$windowCount: UNSNAPPED (Raw point preserved)")
+                    rawGeoPoint
+                }
+            } else {
+                rawGeoPoint
+            }
 
             val gps = lastGpsLocation
             val (driftM, driftPct) = computeDriftMetrics()
@@ -434,9 +472,9 @@ class MainActivity : AppCompatActivity() {
             Log.i(TAG_POSITION, diagLog)
 
             runOnUiThread {
-                animateMarkerTo(aiMarker, targetGeoPoint, durationMs = 1000L)
-                mapView.controller.animateTo(targetGeoPoint)
-                aiPolyline?.addPoint(targetGeoPoint)
+                animateMarkerTo(aiMarker, displayGeoPoint, durationMs = 1000L)
+                mapView.controller.animateTo(displayGeoPoint)
+                aiPolyline?.addPoint(displayGeoPoint)
                 mapView.invalidate()
 
                 val aiSpeedKmh = navState.effectiveSpeed * 3.6f
@@ -737,6 +775,8 @@ class MainActivity : AppCompatActivity() {
         val gps = lastGpsLocation ?: return
         originLat = gps.latitude
         originLon = gps.longitude
+        roadProvider.updateOrigin(gps.latitude, gps.longitude)
+        mapMatcher.roadSegments = roadProvider.getActiveSegments()
 
         val initialBearingRad = Math.toRadians(gps.bearing.toDouble()).toFloat()
         positionEstimator.resetState(0.0f, 0.0f, initialBearingRad, gps.speed)
