@@ -121,6 +121,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnToggleGpsOutage: MaterialButton
     private lateinit var btnResetOrigin: Button
     private lateinit var btnVerifyTests: Button
+    private lateinit var llGpsColumn: LinearLayout
+    private lateinit var llAiColumn: LinearLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -148,6 +150,14 @@ class MainActivity : AppCompatActivity() {
         btnToggleGpsOutage = findViewById(R.id.btnToggleGpsOutage)
         btnResetOrigin = findViewById(R.id.btnResetOrigin)
         btnVerifyTests = findViewById(R.id.btnVerifyTests)
+        llGpsColumn = findViewById(R.id.llGpsColumn)
+        llAiColumn = findViewById(R.id.llAiColumn)
+
+        // Initialize HUD to clean GPS-active standby state
+        llAiColumn.alpha = 0.6f
+        tvAiCoords.text = "Standby (GPS Active)"
+        tvAiMotion.text = "Standby (Synced to GPS)"
+        tvDriftDistance.text = "Drift: 0.0 m (GPS Active)"
 
         btnToggleGpsOutage.setOnClickListener {
             toggleGpsOutageMode()
@@ -201,6 +211,7 @@ class MainActivity : AppCompatActivity() {
             outlinePaint.color = Color.parseColor("#FF5722") // Deep Orange for AI Dead Reckoning
             outlinePaint.strokeWidth = 8f
             outlinePaint.strokeCap = Paint.Cap.ROUND
+            isEnabled = false // Hidden during GPS-active mode; only shown during simulated outage
         }
         aiPolyline = aiLine
         mapView.overlays.add(aiLine)
@@ -218,7 +229,8 @@ class MainActivity : AppCompatActivity() {
             title = "Physics + AI Estimated"
             setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
             icon = createMarkerDrawable(fillColor = Color.parseColor("#FF5722"), strokeColor = Color.WHITE)
-            alpha = 0.85f
+            alpha = 0.0f
+            isEnabled = false // Hidden during GPS-active mode; only shown during simulated outage
         }
         aiMarker = aiMark
         mapView.overlays.add(aiMark)
@@ -321,6 +333,20 @@ class MainActivity : AppCompatActivity() {
         } else {
             gpsMarker?.position = geoPoint
             if (!isGpsOutageMode) {
+                // Keep PositionEstimator continuously snapped/synced to real GPS fix (Requirement 1)
+                val oLat = originLat ?: return
+                val oLon = originLon ?: return
+                val (gpsEast, gpsNorth) = GeoProjection.latLonToEnu(location.latitude, location.longitude, oLat, oLon)
+                val trueBearingRad = Math.toRadians(location.bearing.toDouble()).toFloat()
+                val trueVelocity = location.speed
+                positionEstimator.resetState(
+                    x = gpsEast.toFloat(),
+                    y = gpsNorth.toFloat(),
+                    heading = trueBearingRad,
+                    velocity = trueVelocity
+                )
+                aiMarker?.position = geoPoint
+
                 mapView.controller.animateTo(geoPoint)
             }
         }
@@ -346,60 +372,27 @@ class MainActivity : AppCompatActivity() {
 
         windowCount++
 
-        // 1. Run PositionEstimator full pipeline
-        val navState = positionEstimator.estimatePosition(samples)
-        lastAiState = navState
-        totalDistanceTraveledM += navState.deltaS_final
         if (isGpsOutageMode) {
+            // =========================================================================
+            // OUTAGE MODE: AI-DR is authoritative, estimate & display position (Requirement 2)
+            // =========================================================================
+            val navState = positionEstimator.estimatePosition(samples)
+            lastAiState = navState
+            totalDistanceTraveledM += navState.deltaS_final
             outageDistanceTraveledM += navState.deltaS_final
-        }
 
-        // 2. Convert local ENU (meters) back to LatLon using exact inverse projection
-        val (aiLat, aiLon) = GeoProjection.enuToLatLon(navState.x, navState.y, oLat, oLon)
-        val targetGeoPoint = GeoPoint(aiLat, aiLon)
+            val (aiLat, aiLon) = GeoProjection.enuToLatLon(navState.x, navState.y, oLat, oLon)
+            val targetGeoPoint = GeoPoint(aiLat, aiLon)
 
-        // 3. Log to Logcat with tag SIH_POSITION_TEST
-        val gps = lastGpsLocation
-        val (driftM, driftPct) = computeDriftMetrics()
+            val gps = lastGpsLocation
+            val (driftM, driftPct) = computeDriftMetrics()
 
-        val corrLogStr = if (navState.isStationary) {
-            "0.00m (skipped -- ZUPT active)"
-        } else {
-            "${String.format("%.2f", navState.deltaS_corr)}m"
-        }
+            val corrLogStr = if (navState.isStationary) {
+                "0.00m (skipped -- ZUPT active)"
+            } else {
+                "${String.format("%.2f", navState.deltaS_corr)}m"
+            }
 
-        // Compute signal metrics across this window for diagnostic inspection
-        var sumLinMag = 0f
-        var minLinMag = Float.MAX_VALUE
-        var maxLinMag = 0f
-        var sumRawMag = 0f
-        var sumGyroMag = 0f
-        var maxGyroMag = 0f
-        for (s in samples) {
-            val lMag = kotlin.math.sqrt(s.accLinX * s.accLinX + s.accLinY * s.accLinY + s.accLinZ * s.accLinZ)
-            val rMag = kotlin.math.sqrt(s.accX * s.accX + s.accY * s.accY + s.accZ * s.accZ)
-            val gMag = kotlin.math.sqrt(s.gyroX * s.gyroX + s.gyroY * s.gyroY + s.gyroZ * s.gyroZ)
-            sumLinMag += lMag
-            if (lMag < minLinMag) minLinMag = lMag
-            if (lMag > maxLinMag) maxLinMag = lMag
-            sumRawMag += rMag
-            sumGyroMag += gMag
-            if (gMag > maxGyroMag) maxGyroMag = gMag
-        }
-        val avgLinMag = sumLinMag / samples.size
-        val avgRawMag = sumRawMag / samples.size
-        val avgGyroMag = sumGyroMag / samples.size
-        val s0 = samples.first()
-
-        val diagLog = "Window #$windowCount | isStationary=${navState.isStationary} | " +
-                "a_mag(lin): avg=${String.format("%.3f", avgLinMag)}, max=${String.format("%.3f", maxLinMag)} m/s² (A_TH=5.389) | " +
-                "a_raw(grav): avg=${String.format("%.3f", avgRawMag)} m/s² | " +
-                "gyro_mag: avg=${String.format("%.3f", avgGyroMag)}, max=${String.format("%.3f", maxGyroMag)} rad/s (W_TH=0.753) | " +
-                "dS_imu=${String.format("%.3f", navState.deltaS_imu)}m, dS_corr=$corrLogStr, dS_final=${String.format("%.3f", navState.deltaS_final)}m, v_eff=${String.format("%.2f", navState.effectiveSpeed * 3.6f)} km/h | " +
-                "Sample[0] raw_acc=(${String.format("%.2f", s0.accX)}, ${String.format("%.2f", s0.accY)}, ${String.format("%.2f", s0.accZ)}), lin_acc=(${String.format("%.2f", s0.accLinX)}, ${String.format("%.2f", s0.accLinY)}, ${String.format("%.2f", s0.accLinZ)})"
-        Log.i(TAG_POSITION, diagLog)
-
-        if (isGpsOutageMode) {
             val elapsedS = (System.currentTimeMillis() - outageStartTimeMs) / 1000f
             val logMsg = "[GPS_LOST_MODE] Window #$windowCount (Outage: ${String.format("%.1f", elapsedS)}s) | " +
                     "True GPS: (${String.format("%.6f", gps?.latitude ?: 0.0)}, ${String.format("%.6f", gps?.longitude ?: 0.0)}) | " +
@@ -408,35 +401,64 @@ class MainActivity : AppCompatActivity() {
                     "dS_imu: ${String.format("%.2f", navState.deltaS_imu)}m | dS_corr: $corrLogStr | " +
                     "dS_final: ${String.format("%.2f", navState.deltaS_final)}m"
             Log.i(TAG_POSITION, logMsg)
-        } else {
-            val logMsg = "GPS: (${String.format("%.6f", gps?.latitude ?: 0.0)}, ${String.format("%.6f", gps?.longitude ?: 0.0)}) | " +
-                    "AI: (${String.format("%.6f", aiLat)}, ${String.format("%.6f", aiLon)}) | " +
-                    "Drift: ${String.format("%.1f", driftM)}m (${String.format("%.2f", driftPct)}%) | " +
-                    "dS_imu: ${String.format("%.2f", navState.deltaS_imu)}m | dS_corr: $corrLogStr | " +
-                    "dS_final: ${String.format("%.2f", navState.deltaS_final)}m"
-            Log.i(TAG_POSITION, logMsg)
-        }
 
-        // 4. Smoothly animate AI Marker to new position over 1.0 second
-        runOnUiThread {
-            animateMarkerTo(aiMarker, targetGeoPoint, durationMs = 1000L)
-
-            // If in GPS Lost mode, AI DR is authoritative; camera centers on AI position
-            if (isGpsOutageMode) {
-                mapView.controller.animateTo(targetGeoPoint)
+            // Compute signal metrics across this window for diagnostic inspection
+            var sumLinMag = 0f
+            var minLinMag = Float.MAX_VALUE
+            var maxLinMag = 0f
+            var sumRawMag = 0f
+            var sumGyroMag = 0f
+            var maxGyroMag = 0f
+            for (s in samples) {
+                val lMag = kotlin.math.sqrt(s.accLinX * s.accLinX + s.accLinY * s.accLinY + s.accLinZ * s.accLinZ)
+                val rMag = kotlin.math.sqrt(s.accX * s.accX + s.accY * s.accY + s.accZ * s.accZ)
+                val gMag = kotlin.math.sqrt(s.gyroX * s.gyroX + s.gyroY * s.gyroY + s.gyroZ * s.gyroZ)
+                sumLinMag += lMag
+                if (lMag < minLinMag) minLinMag = lMag
+                if (lMag > maxLinMag) maxLinMag = lMag
+                sumRawMag += rMag
+                sumGyroMag += gMag
+                if (gMag > maxGyroMag) maxGyroMag = gMag
             }
+            val avgLinMag = sumLinMag / samples.size
+            val avgRawMag = sumRawMag / samples.size
+            val avgGyroMag = sumGyroMag / samples.size
+            val s0 = samples.first()
 
-            // Append to AI Trail
-            aiPolyline?.addPoint(targetGeoPoint)
-            mapView.invalidate()
+            val diagLog = "Window #$windowCount | isStationary=${navState.isStationary} | " +
+                    "a_mag(lin): avg=${String.format("%.3f", avgLinMag)}, max=${String.format("%.3f", maxLinMag)} m/s² (A_TH=5.389) | " +
+                    "a_raw(grav): avg=${String.format("%.3f", avgRawMag)} m/s² | " +
+                    "gyro_mag: avg=${String.format("%.3f", avgGyroMag)}, max=${String.format("%.3f", maxGyroMag)} rad/s (W_TH=0.753) | " +
+                    "dS_imu=${String.format("%.3f", navState.deltaS_imu)}m, dS_corr=$corrLogStr, dS_final=${String.format("%.3f", navState.deltaS_final)}m, v_eff=${String.format("%.2f", navState.effectiveSpeed * 3.6f)} km/h | " +
+                    "Sample[0] raw_acc=(${String.format("%.2f", s0.accX)}, ${String.format("%.2f", s0.accY)}, ${String.format("%.2f", s0.accZ)}), lin_acc=(${String.format("%.2f", s0.accLinX)}, ${String.format("%.2f", s0.accLinY)}, ${String.format("%.2f", s0.accLinZ)})"
+            Log.i(TAG_POSITION, diagLog)
 
-            // Update HUD text using real effective speed derived from actual position delta
-            val aiSpeedKmh = navState.effectiveSpeed * 3.6f
-            tvAiCoords.text = "Lat: ${String.format("%.5f", aiLat)}\nLon: ${String.format("%.5f", aiLon)}"
-            tvAiMotion.text = "Speed: ${String.format("%.1f", aiSpeedKmh)} km/h | ψ: ${String.format("%.1f", navState.headingDeg)}°"
-            tvWindowCount.text = "Window #$windowCount (Δs=${String.format("%.1f", navState.deltaS_final)}m)"
+            runOnUiThread {
+                animateMarkerTo(aiMarker, targetGeoPoint, durationMs = 1000L)
+                mapView.controller.animateTo(targetGeoPoint)
+                aiPolyline?.addPoint(targetGeoPoint)
+                mapView.invalidate()
 
-            updateSeparationAndDrift()
+                val aiSpeedKmh = navState.effectiveSpeed * 3.6f
+                tvAiCoords.text = "Lat: ${String.format("%.5f", aiLat)}\nLon: ${String.format("%.5f", aiLon)}"
+                tvAiMotion.text = "Speed: ${String.format("%.1f", aiSpeedKmh)} km/h | ψ: ${String.format("%.1f", navState.headingDeg)}°"
+                tvWindowCount.text = "Window #$windowCount (Δs=${String.format("%.1f", navState.deltaS_final)}m)"
+
+                updateSeparationAndDrift()
+            }
+        } else {
+            // =========================================================================
+            // GPS ACTIVE MODE: Do NOT draw AI-DR marker or accumulate polyline (Requirement 1)
+            // PositionEstimator stays continuously synced to real GPS
+            // =========================================================================
+            val gps = lastGpsLocation
+            val logMsg = "[GPS_ACTIVE_MODE] Window #$windowCount | GPS: (${String.format("%.6f", gps?.latitude ?: 0.0)}, ${String.format("%.6f", gps?.longitude ?: 0.0)}) | AI-DR: Standby (Synced to GPS)"
+            Log.i(TAG_POSITION, logMsg)
+
+            runOnUiThread {
+                tvWindowCount.text = "Window #$windowCount (GPS Active)"
+                updateSeparationAndDrift()
+            }
         }
     }
 
@@ -476,10 +498,15 @@ class MainActivity : AppCompatActivity() {
             // Snap AI marker exactly to current GPS position at start of outage
             val currentGpsGeoPoint = GeoPoint(gps.latitude, gps.longitude)
             aiMarker?.position = currentGpsGeoPoint
-
-            // 2. Visual Differentiation: AI Marker becomes primary; GPS marker becomes faint background ground truth
+            aiMarker?.isEnabled = true
             aiMarker?.alpha = 1.0f
             aiMarker?.title = "PRIMARY: AI Dead Reckoning (Authoritative)"
+
+            // Start accumulating AI Polyline fresh from current GPS location (Requirement 2)
+            aiPolyline?.isEnabled = true
+            aiPolyline?.setPoints(mutableListOf(currentGpsGeoPoint))
+
+            // 2. Visual Differentiation: AI Marker becomes primary; GPS marker becomes faint background ground truth
             gpsMarker?.alpha = 0.35f
             gpsMarker?.title = "Ground Truth Reference (GPS - Inactive)"
 
@@ -494,6 +521,12 @@ class MainActivity : AppCompatActivity() {
             llOutageBanner.visibility = View.VISIBLE
             tvOutageBannerText.text = "⚠️ GPS LOST: AI ESTIMATING"
             tvOutageTimer.text = "Outage: 0.0s"
+
+            llAiColumn.alpha = 1.0f
+            llGpsColumn.alpha = 0.5f
+
+            tvAiCoords.text = "Lat: ${String.format("%.5f", gps.latitude)}\nLon: ${String.format("%.5f", gps.longitude)}"
+            tvAiMotion.text = "Speed: ${String.format("%.1f", gps.speed * 3.6f)} km/h | ψ: ${String.format("%.1f", gps.bearing)}°"
 
             // Start 1Hz UI ticker to update outage elapsed duration in real-time
             startOutageTimerTicker()
@@ -539,13 +572,17 @@ class MainActivity : AppCompatActivity() {
             animateResync(aiMarker, aiCurrentGeo, realGpsGeo, durationMs = 1800L) {
                 isGpsOutageMode = false
 
-                // Restore primary/secondary marker styling
+                // 1. Hide AI-DR marker and polyline (Requirements 1 & 3)
+                aiMarker?.isEnabled = false
+                aiMarker?.alpha = 0.0f
+                aiPolyline?.isEnabled = false
+                aiPolyline?.setPoints(emptyList())
+
+                // 2. Restore primary/secondary marker styling
                 gpsMarker?.alpha = 1.0f
                 gpsMarker?.title = "Primary: Real GPS Location"
-                aiMarker?.alpha = 0.85f
-                aiMarker?.title = "Secondary: AI DR Estimate"
 
-                // Re-align PositionEstimator to current GPS position for clean continuous tracking
+                // 3. Re-align PositionEstimator to current GPS position for clean continuous tracking
                 val (gpsEast, gpsNorth) = GeoProjection.latLonToEnu(gps.latitude, gps.longitude, oLat, oLon)
                 positionEstimator.resetState(
                     x = gpsEast.toFloat(),
@@ -554,7 +591,7 @@ class MainActivity : AppCompatActivity() {
                     velocity = gps.speed
                 )
 
-                // Restore controls & HUD
+                // 4. Restore controls & HUD
                 btnToggleGpsOutage.text = "SIMULATE GPS LOSS"
                 btnToggleGpsOutage.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#D32F2F")) // Red
                 btnToggleGpsOutage.setIconResource(android.R.drawable.ic_dialog_alert)
@@ -562,6 +599,13 @@ class MainActivity : AppCompatActivity() {
                 tvGpsStatusBadge.text = "MODE: LIVE GPS"
                 tvGpsStatusBadge.setBackgroundColor(Color.parseColor("#2E7D32")) // Green
                 llOutageBanner.visibility = View.GONE
+
+                llAiColumn.alpha = 0.6f
+                llGpsColumn.alpha = 1.0f
+
+                tvAiCoords.text = "Standby (GPS Active)"
+                tvAiMotion.text = "Standby (Synced to GPS)"
+                tvDriftDistance.text = "Drift: 0.0 m (GPS Active)"
 
                 mapView.controller.animateTo(realGpsGeo)
                 mapView.invalidate()
@@ -681,9 +725,12 @@ class MainActivity : AppCompatActivity() {
      * Updates HUD display with current drift distance and percentage.
      */
     private fun updateSeparationAndDrift() {
-        val (separationM, driftPct) = computeDriftMetrics()
-        val label = if (isGpsOutageMode) "Outage Drift" else "Separation"
-        tvDriftDistance.text = "$label: ${String.format("%.1f", separationM)} m (${String.format("%.2f", driftPct)}%)"
+        if (isGpsOutageMode) {
+            val (separationM, driftPct) = computeDriftMetrics()
+            tvDriftDistance.text = "Outage Drift: ${String.format("%.1f", separationM)} m (${String.format("%.2f", driftPct)}%)"
+        } else {
+            tvDriftDistance.text = "Drift: 0.0 m (GPS Active)"
+        }
     }
 
     private fun resetOriginToCurrentLocation() {
@@ -696,17 +743,30 @@ class MainActivity : AppCompatActivity() {
 
         val currentGeo = GeoPoint(gps.latitude, gps.longitude)
         gpsMarker?.position = currentGeo
-        aiMarker?.position = currentGeo
-
         gpsPolyline?.setPoints(mutableListOf(currentGeo))
-        aiPolyline?.setPoints(mutableListOf(currentGeo))
+
+        if (isGpsOutageMode) {
+            aiMarker?.position = currentGeo
+            aiMarker?.isEnabled = true
+            aiMarker?.alpha = 1.0f
+            aiPolyline?.isEnabled = true
+            aiPolyline?.setPoints(mutableListOf(currentGeo))
+        } else {
+            aiMarker?.position = currentGeo
+            aiMarker?.isEnabled = false
+            aiMarker?.alpha = 0.0f
+            aiPolyline?.isEnabled = false
+            aiPolyline?.setPoints(emptyList())
+        }
 
         totalDistanceTraveledM = 0.0f
         outageDistanceTraveledM = 0.0f
         windowCount = 0
 
-        tvAiCoords.text = "Lat: ${String.format("%.5f", gps.latitude)}\nLon: ${String.format("%.5f", gps.longitude)}"
-        tvDriftDistance.text = "Separation: 0.0 m (0.00%)"
+        tvGpsCoords.text = "Lat: ${String.format("%.5f", gps.latitude)}\nLon: ${String.format("%.5f", gps.longitude)}"
+        tvAiCoords.text = if (isGpsOutageMode) "Lat: ${String.format("%.5f", gps.latitude)}\nLon: ${String.format("%.5f", gps.longitude)}" else "Standby (GPS Active)"
+        tvAiMotion.text = if (isGpsOutageMode) "Speed: 0.0 km/h | ψ: ${String.format("%.1f", gps.bearing)}°" else "Standby (Synced to GPS)"
+        tvDriftDistance.text = if (isGpsOutageMode) "Outage Drift: 0.0 m (0.00%)" else "Drift: 0.0 m (GPS Active)"
         tvWindowCount.text = "Window #0 (Reset)"
 
         mapView.controller.animateTo(currentGeo)
