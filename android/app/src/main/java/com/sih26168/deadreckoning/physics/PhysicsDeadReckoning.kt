@@ -231,8 +231,8 @@ class PhysicsDeadReckoning(
         }
 
         // Determine if device was stationary during this window (no motion)
-        val isStationaryWindow = (stationaryCount >= (nSamples - startK - WINDOW_LEN) || consecutiveStationaryCount >= (nSamples - startK)) &&
-                dsImu < 0.05f &&
+        val isStationaryWindow = (stationaryCount >= (nSamples / 2) || consecutiveStationaryCount >= WINDOW_LEN) &&
+                dsImu < 0.10f &&
                 vStep == 0.0f
 
         return PhysicsResult(

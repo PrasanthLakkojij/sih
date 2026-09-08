@@ -368,6 +368,37 @@ class MainActivity : AppCompatActivity() {
             "${String.format("%.2f", navState.deltaS_corr)}m"
         }
 
+        // Compute signal metrics across this window for diagnostic inspection
+        var sumLinMag = 0f
+        var minLinMag = Float.MAX_VALUE
+        var maxLinMag = 0f
+        var sumRawMag = 0f
+        var sumGyroMag = 0f
+        var maxGyroMag = 0f
+        for (s in samples) {
+            val lMag = kotlin.math.sqrt(s.accLinX * s.accLinX + s.accLinY * s.accLinY + s.accLinZ * s.accLinZ)
+            val rMag = kotlin.math.sqrt(s.accX * s.accX + s.accY * s.accY + s.accZ * s.accZ)
+            val gMag = kotlin.math.sqrt(s.gyroX * s.gyroX + s.gyroY * s.gyroY + s.gyroZ * s.gyroZ)
+            sumLinMag += lMag
+            if (lMag < minLinMag) minLinMag = lMag
+            if (lMag > maxLinMag) maxLinMag = lMag
+            sumRawMag += rMag
+            sumGyroMag += gMag
+            if (gMag > maxGyroMag) maxGyroMag = gMag
+        }
+        val avgLinMag = sumLinMag / samples.size
+        val avgRawMag = sumRawMag / samples.size
+        val avgGyroMag = sumGyroMag / samples.size
+        val s0 = samples.first()
+
+        val diagLog = "Window #$windowCount | isStationary=${navState.isStationary} | " +
+                "a_mag(lin): avg=${String.format("%.3f", avgLinMag)}, max=${String.format("%.3f", maxLinMag)} m/s² (A_TH=5.389) | " +
+                "a_raw(grav): avg=${String.format("%.3f", avgRawMag)} m/s² | " +
+                "gyro_mag: avg=${String.format("%.3f", avgGyroMag)}, max=${String.format("%.3f", maxGyroMag)} rad/s (W_TH=0.753) | " +
+                "dS_imu=${String.format("%.3f", navState.deltaS_imu)}m, dS_corr=$corrLogStr, dS_final=${String.format("%.3f", navState.deltaS_final)}m, v_eff=${String.format("%.2f", navState.effectiveSpeed * 3.6f)} km/h | " +
+                "Sample[0] raw_acc=(${String.format("%.2f", s0.accX)}, ${String.format("%.2f", s0.accY)}, ${String.format("%.2f", s0.accZ)}), lin_acc=(${String.format("%.2f", s0.accLinX)}, ${String.format("%.2f", s0.accLinY)}, ${String.format("%.2f", s0.accLinZ)})"
+        Log.i(TAG_POSITION, diagLog)
+
         if (isGpsOutageMode) {
             val elapsedS = (System.currentTimeMillis() - outageStartTimeMs) / 1000f
             val logMsg = "[GPS_LOST_MODE] Window #$windowCount (Outage: ${String.format("%.1f", elapsedS)}s) | " +
