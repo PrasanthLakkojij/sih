@@ -266,8 +266,8 @@ out body;
                 if (elem.optString("type") == "way") {
                     val id = elem.getLong("id")
                     val tags = elem.optJSONObject("tags")
-                    val highway = tags?.optString("highway")
-                    val name = tags?.optString("name")
+                    val highway = tags?.optString("highway")?.takeIf { it.isNotBlank() }
+                    val name = tags?.optString("name")?.takeIf { it.isNotBlank() }
 
                     val nodeIds = elem.optJSONArray("nodes") ?: continue
                     val wayCoords = mutableListOf<Pair<Double, Double>>()

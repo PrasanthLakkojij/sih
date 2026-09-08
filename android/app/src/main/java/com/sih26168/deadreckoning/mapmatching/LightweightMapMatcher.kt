@@ -137,14 +137,18 @@ class LightweightMapMatcher(
 
         return if (bestSegment != null) {
             val (snappedLat, snappedLon) = GeoProjection.enuToLatLon(bestSnappedX, bestSnappedY, originLat, originLon)
-            SnapResult(
-                displayLat = snappedLat,
-                displayLon = snappedLon,
-                isSnapped = true,
-                snapDistanceM = bestDistance,
-                headingDiffDeg = Math.toDegrees(bestAngleDiff),
-                matchedRoadName = bestSegment.name ?: bestSegment.highwayType ?: "Unnamed Road"
-            )
+                val roadLabel = bestSegment.name?.takeIf { it.isNotBlank() }
+                    ?: bestSegment.highwayType?.takeIf { it.isNotBlank() }?.let { "${it.replaceFirstChar { c -> c.uppercase() }} Road" }
+                    ?: "Road #${bestSegment.id}"
+
+                SnapResult(
+                    displayLat = snappedLat,
+                    displayLon = snappedLon,
+                    isSnapped = true,
+                    snapDistanceM = bestDistance,
+                    headingDiffDeg = Math.toDegrees(bestAngleDiff),
+                    matchedRoadName = roadLabel
+                )
         } else {
             SnapResult(
                 displayLat = rawLat,
