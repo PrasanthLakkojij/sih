@@ -13,7 +13,8 @@ import kotlin.math.sqrt
 
 /**
  * IMUSensorCollector:
- * 1. Collects live phone sensor streams (Accelerometer, Linear Acceleration, Gyroscope, Gravity).
+ * 1. Collects live phone sensor streams (Accelerometer, Linear Acceleration, Gyroscope, Gravity,
+ *    Magnetometer -- see Sample.magX/Y/Z doc for why the magnetometer isn't fused yet).
  * 2. Buffers readings in a rolling ~9.0-second window downsampled/resampled to nominal 10Hz.
  * 3. Transforms phone body linear acceleration and gyro into vehicle coordinate frame
  *    (using vertical projection via gravity vector).
@@ -22,7 +23,11 @@ import kotlin.math.sqrt
 class IMUSensorCollector(
     context: Context,
     var onWindowSamplesReady: ((samples: List<Sample>) -> Unit)? = null,
-    private val onWindowReady: ((features: FloatArray, dtSeconds: Float, sampleCount: Int) -> Unit)? = null
+    private val onWindowReady: ((features: FloatArray, dtSeconds: Float, sampleCount: Int) -> Unit)? = null,
+    /** Fired for every 10Hz sample as it arrives -- for continuous (non-batched)
+     * consumers like EkfPositionEstimator. Does not affect the existing 91-sample
+     * batching path above; both fire independently off the same sample stream. */
+    var onSampleReady: ((sample: Sample) -> Unit)? = null
 ) : SensorEventListener {
 
     constructor(
@@ -36,6 +41,13 @@ class IMUSensorCollector(
     private val linAccSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
     private val gyroSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
     private val gravSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
+    // Registered per PS requirement ("accelerometer, gyroscope, and magnetometer/compass").
+    // Raw field only -- deliberately NOT fused into heading yet. Tilt-compensated
+    // compass heading near a vehicle's ferrous chassis/engine is a well-known
+    // unreliable case, and there is no reference implementation (Python or
+    // otherwise) in this project to verify the fusion math against. See session
+    // notes: shipping unverified sensor-fusion math was ruled out on purpose.
+    private val magSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
 
     // Current latest raw sample readings
     @Volatile private var latestAccX = 0f
@@ -54,12 +66,18 @@ class IMUSensorCollector(
     @Volatile private var latestGravY = 0f
     @Volatile private var latestGravZ = -9.81f
 
+    @Volatile private var latestMagX = 0f
+    @Volatile private var latestMagY = 0f
+    @Volatile private var latestMagZ = 0f
+
     // Buffer of synchronized 10Hz samples
     data class Sample(
         val accX: Float, val accY: Float, val accZ: Float,
         val accLinX: Float, val accLinY: Float, val accLinZ: Float,
         val gyroX: Float, val gyroY: Float, val gyroZ: Float,
-        val accVehFwd: Float, val gyroVehYawRate: Float,
+        val accVehFwd: Float, val accVehLat: Float, val gyroVehYawRate: Float,
+        /** Raw magnetometer field (uT), phone frame. Not yet fused -- see class doc. */
+        val magX: Float, val magY: Float, val magZ: Float,
         val timestampNs: Long
     )
 
@@ -86,6 +104,7 @@ class IMUSensorCollector(
         linAccSensor?.let { sensorManager.registerListener(this, it, rate) }
         gyroSensor?.let { sensorManager.registerListener(this, it, rate) }
         gravSensor?.let { sensorManager.registerListener(this, it, rate) }
+        magSensor?.let { sensorManager.registerListener(this, it, rate) }
     }
 
     fun stop() {
@@ -118,6 +137,11 @@ class IMUSensorCollector(
                 latestGravY = event.values[1]
                 latestGravZ = event.values[2]
             }
+            Sensor.TYPE_MAGNETIC_FIELD -> {
+                latestMagX = event.values[0]
+                latestMagY = event.values[1]
+                latestMagZ = event.values[2]
+            }
         }
 
         val nowNs = event.timestamp
@@ -139,7 +163,11 @@ class IMUSensorCollector(
             val ayHoriz = latestLinY - aVert * upY
 
             // 4. Vehicle forward & lateral acceleration
+            // Matches phase4_orientation.py's transform_to_vehicle_frame() exactly:
+            // a_fwd = ax_horiz*cos(theta) + ay_horiz*sin(theta)
+            // a_lat = -ax_horiz*sin(theta) + ay_horiz*cos(theta)
             val aFwd = axHoriz * cos(mountingYawRad) + ayHoriz * sin(mountingYawRad)
+            val aLat = -axHoriz * sin(mountingYawRad) + ayHoriz * cos(mountingYawRad)
 
             // 5. Yaw rate around vertical axis
             val gyroYawRate = latestGyroX * upX + latestGyroY * upY + latestGyroZ * upZ
@@ -148,10 +176,12 @@ class IMUSensorCollector(
                 accX = latestAccX, accY = latestAccY, accZ = latestAccZ,
                 accLinX = latestLinX, accLinY = latestLinY, accLinZ = latestLinZ,
                 gyroX = latestGyroX, gyroY = latestGyroY, gyroZ = latestGyroZ,
-                accVehFwd = aFwd, gyroVehYawRate = gyroYawRate,
+                accVehFwd = aFwd, accVehLat = aLat, gyroVehYawRate = gyroYawRate,
+                magX = latestMagX, magY = latestMagY, magZ = latestMagZ,
                 timestampNs = nowNs
             )
             sampleBuffer.add(sample)
+            onSampleReady?.invoke(sample)
 
             // Check if buffer reached ~9.0 seconds (91 samples)
             if (sampleBuffer.size >= windowSamples) {

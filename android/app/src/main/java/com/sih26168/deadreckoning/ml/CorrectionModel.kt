@@ -11,9 +11,15 @@ import java.nio.FloatBuffer
 
 /**
  * Functional interface for dead-reckoning correction prediction.
+ *
+ * Returns null on inference failure -- NOT 0.0f. A silent 0.0f is
+ * indistinguishable from a genuine "no correction needed" prediction, so a
+ * broken model would look like it agrees with physics instead of visibly
+ * failing (bug found and fixed this session; same pattern as
+ * VelocityModel/IVelocityModel).
  */
 fun interface ICorrectionModel {
-    fun predict(features: FloatArray): Float
+    fun predict(features: FloatArray): Float?
 }
 
 /**
@@ -23,13 +29,17 @@ fun interface ICorrectionModel {
  * 1. Takes 58 features as FloatArray.
  * 2. Explicitly constructs a 2D batch tensor of shape [1, 58] (batch size = 1),
  *    matching the FloatTensorType([None, 58]) expected by the converted XGBoost model.
- * 3. Gracefully handles model loading and execution errors.
+ * 3. Gracefully handles model loading and execution errors -- by reporting
+ *    them via the return value and [lastFailure], not by hiding them.
  */
 class CorrectionModel : ICorrectionModel, AutoCloseable {
 
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private var session: OrtSession? = null
     private val modelAssetPath = "c1_correction_model.onnx"
+
+    var lastFailure: Exception? = null
+        private set
 
     constructor(context: Context) {
         try {
@@ -40,6 +50,7 @@ class CorrectionModel : ICorrectionModel, AutoCloseable {
             session = env.createSession(modelBytes, OrtSession.SessionOptions())
         } catch (e: Exception) {
             e.printStackTrace()
+            lastFailure = e
             session = null
         }
     }
@@ -49,6 +60,7 @@ class CorrectionModel : ICorrectionModel, AutoCloseable {
             session = env.createSession(modelBytes, OrtSession.SessionOptions())
         } catch (e: Exception) {
             e.printStackTrace()
+            lastFailure = e
             session = null
         }
     }
@@ -57,12 +69,13 @@ class CorrectionModel : ICorrectionModel, AutoCloseable {
      * Run inference on 58 windowed IMU features.
      *
      * @param features FloatArray of size 58.
-     * @return Displacement correction in meters (Δs_corr). Returns 0.0f if inference fails.
+     * @return Displacement correction in meters (deltaS_corr), or null if
+     * inference failed -- check [lastFailure] for the cause.
      */
-    override fun predict(features: FloatArray): Float {
+    override fun predict(features: FloatArray): Float? {
         val currentSession = session ?: run {
-            System.err.println("CorrectionModel: ONNX session is not initialized.")
-            return 0.0f
+            lastFailure = IllegalStateException("CorrectionModel: ONNX session is not initialized.")
+            return null
         }
 
         require(features.size == 58) {
@@ -87,18 +100,20 @@ class CorrectionModel : ICorrectionModel, AutoCloseable {
                         when (firstRow) {
                             is FloatArray -> firstRow[0]
                             is Number -> firstRow.toFloat()
-                            else -> 0.0f
+                            else -> null
                         }
                     }
                     is FloatArray -> rawOutput[0]
-                    else -> 0.0f
+                    else -> null
                 }
             }
             inputTensor.close()
+            lastFailure = null
             resultValue
         } catch (e: Exception) {
             e.printStackTrace()
-            0.0f
+            lastFailure = e
+            null
         }
     }
 

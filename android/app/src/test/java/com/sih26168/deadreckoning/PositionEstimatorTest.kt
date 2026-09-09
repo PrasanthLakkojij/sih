@@ -164,7 +164,8 @@ class PositionEstimatorTest {
                         accX = 0.01f, accY = -0.01f, accZ = 9.81f,
                         accLinX = 0.01f, accLinY = -0.01f, accLinZ = 0.02f,
                         gyroX = 0.001f, gyroY = -0.001f, gyroZ = 0.002f,
-                        accVehFwd = 0.005f, gyroVehYawRate = 0.001f,
+                        accVehFwd = 0.005f, accVehLat = 0.0f, gyroVehYawRate = 0.001f,
+                        magX = 0f, magY = 0f, magZ = 0f,
                         timestampNs = currentTimeNs
                     )
                 )
@@ -212,7 +213,8 @@ class PositionEstimatorTest {
                         accX = 0f, accY = 0f, accZ = 9.81f,
                         accLinX = 6.0f, accLinY = 0.5f, accLinZ = 0.2f, // Linear acceleration above locked A_TH = 5.389 m/s^2
                         gyroX = 0.1f, gyroY = 0.1f, gyroZ = 0.0f,
-                        accVehFwd = 0.5f, gyroVehYawRate = 0f, // Active forward acceleration
+                        accVehFwd = 0.5f, accVehLat = 0.0f, gyroVehYawRate = 0f, // Active forward acceleration
+                        magX = 0f, magY = 0f, magZ = 0f,
                         timestampNs = currentTimeNs
                     )
                 )

@@ -1,0 +1,9 @@
+{
+  "outage_duration_s": 46.699955463409424,
+  "dist_true_m": 7.60544903874981,
+  "pos_err_m": 19.14917857357582,
+  "drift_pct": 251.78235336284075,
+  "vel_err_ms": 3.189696567138164,
+  "head_err_deg": 158.99896869428184,
+  "caveat": "Walking-pace test (max 4 km/h, 16m), NOT a vehicle GNSS-outage validation. Model trained on 30-90 km/h vehicle driving (IO-VNBD). Extreme domain mismatch by necessity -- no vehicle recording exists in this repo."
+}
