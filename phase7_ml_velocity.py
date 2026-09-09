@@ -609,6 +609,12 @@ if __name__ == "__main__":
 
     X_all, y_vel_all, y_course_all, meta_all = build_dataset()
 
+    # Persist cache for downstream phases (Phase 10 reads this)
+    np.save("data/phase7_cache_X.npy", X_all)
+    np.save("data/phase7_cache_y.npy", y_vel_all)
+    meta_all.to_parquet("data/phase7_cache_meta.parquet")
+    print(f"  Cache written: data/phase7_cache_{{X,y,meta}}.* for Phase 10.")
+
     results_df = run_loto_cv(X_all, y_vel_all, meta_all)
     summ       = print_summary_table(results_df)
 
