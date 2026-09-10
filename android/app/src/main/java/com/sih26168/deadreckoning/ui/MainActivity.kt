@@ -35,14 +35,18 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.material.button.MaterialButton
 import com.sih26168.deadreckoning.R
+import com.sih26168.deadreckoning.engine.EkfPositionEstimator
 import com.sih26168.deadreckoning.engine.NavigationState
 import com.sih26168.deadreckoning.engine.PositionEstimator
 import com.sih26168.deadreckoning.ml.CorrectionModel
+import com.sih26168.deadreckoning.ml.VelocityModel
 import com.sih26168.deadreckoning.sensor.IMUSensorCollector
+import com.sih26168.deadreckoning.sensor.MountingYawCalibrator
 import com.sih26168.deadreckoning.test.OnnxVerificationActivity
 import com.sih26168.deadreckoning.mapmatching.LightweightMapMatcher
 import com.sih26168.deadreckoning.mapmatching.OverpassRoadProvider
 import com.sih26168.deadreckoning.util.GeoProjection
+import com.sih26168.deadreckoning.util.GpsDisplaySmoother
 import com.sih26168.deadreckoning.util.LatLng
 import com.sih26168.deadreckoning.util.SphericalLatLonInterpolator
 import org.osmdroid.config.Configuration
@@ -77,6 +81,23 @@ class MainActivity : AppCompatActivity() {
         private const val TAG_POSITION = "SIH_POSITION_TEST"
         private const val LOCATION_PERMISSION_REQ_CODE = 1001
         private const val DEFAULT_ZOOM = 18.5
+        // ~60s at 10Hz -- matches the pre-outage bias calibration window
+        // validated in phase10_fusion_engine.py's estimate_*_bias_preoutage().
+        private const val PRE_OUTAGE_HISTORY_MAX_SAMPLES = 600
+        // ~120s at 10Hz -- generous window for the mounting-yaw correlation
+        // search, which needs >=100 "moving" samples and ideally several
+        // distinct acceleration/braking events to converge well.
+        private const val YAW_CALIB_HISTORY_MAX_SAMPLES = 1200
+        // Recalibrate roughly every 30s of driving, not every sample --
+        // the correlation search over 361 angles is cheap but pointless to
+        // rerun every 100ms when the mounting hasn't changed.
+        private const val YAW_RECALIBRATION_INTERVAL_SAMPLES = 300
+        // Raised from 0.3 -- see recalibrateMountingYaw() doc comment.
+        private const val YAW_CALIB_MIN_CORRELATION = 0.6
+        private const val YAW_CALIB_MIN_SPEED_MS = 2.78 // ~10 km/h
+        // Below this, dead reckoning is started from a state the pipeline has
+        // no way to validate is genuinely "moving" -- see toggleGpsOutageMode().
+        private const val OUTAGE_START_MIN_SPEED_MS = 1.5 // ~5.4 km/h
     }
 
     private lateinit var mapView: MapView
@@ -87,6 +108,26 @@ class MainActivity : AppCompatActivity() {
     private lateinit var correctionModel: CorrectionModel
     private lateinit var positionEstimator: PositionEstimator
     private lateinit var sensorCollector: IMUSensorCollector
+
+    // Continuous EKF Fusion Engine (session port of phase10_fusion_engine.py):
+    // NHC + ZUPT-vs-ML veto gate + pre-outage bias calibration + map-matching
+    // heading feedback. Authoritative for position during outage mode, driven
+    // per-10Hz-sample rather than per-9s-window.
+    private lateinit var velocityModel: VelocityModel
+    private lateinit var ekfEstimator: EkfPositionEstimator
+    private val preOutageHistory = ArrayDeque<IMUSensorCollector.Sample>()
+    private var lastEkfSampleNs: Long = 0L
+    private var lastEkfEast: Double = 0.0
+    private var lastEkfNorth: Double = 0.0
+
+    // Dynamic mounting-yaw calibration (session Phase 5 port of
+    // phase4_orientation.py's compute_kinematic_alignment): replaces the
+    // static dashboard-flat-mount assumption (mountingYawRad = 0) with an
+    // online estimate from GPS-speed-derived acceleration correlation.
+    // Requires GPS, so it only runs/updates during GPS-active mode.
+    private data class YawCalibSample(val tSec: Double, val gpsSpeedMs: Double, val accLinX: Double, val accLinY: Double)
+    private val yawCalibHistory = ArrayDeque<YawCalibSample>()
+    private var yawSamplesSinceRecalibration = 0
 
     // Reference Origin Point for ENU <-> LatLon conversion
     private var originLat: Double? = null
@@ -106,6 +147,10 @@ class MainActivity : AppCompatActivity() {
     // osmdroid Markers & Polylines
     private var gpsMarker: Marker? = null
     private var aiMarker: Marker? = null
+    // Display-only smoothing state for the blue GPS marker -- see
+    // GpsDisplaySmoother doc comment. Never read by anything that does real
+    // position estimation; those all keep consuming the raw Location fix.
+    private var displayedGpsState: GpsDisplaySmoother.State? = null
     private var gpsPolyline: Polyline? = null
     private var aiPolyline: Polyline? = null
 
@@ -185,11 +230,25 @@ class MainActivity : AppCompatActivity() {
         correctionModel = CorrectionModel(this)
         positionEstimator = PositionEstimator(correctionModel)
 
+        // 4b. Initialize Continuous EKF Fusion Engine (NHC + ZUPT-veto gate +
+        // bias calibration + map-matching heading feedback). Authoritative
+        // for position during outage; see ekfEstimator field doc.
+        velocityModel = VelocityModel(this)
+        ekfEstimator = EkfPositionEstimator(
+            velocityModel = velocityModel,
+            roadMatcher = { px, py, psi ->
+                if (isMapMatchingEnabled && ::mapMatcher.isInitialized) mapMatcher.matchHeading(px, py, psi) else null
+            }
+        )
+
         // 5. Initialize IMU Sensor Collector (10Hz target rate, SENSOR_DELAY_GAME)
         sensorCollector = IMUSensorCollector(
             context = this,
             onWindowSamplesReady = { samples ->
                 onNewImuWindowReceived(samples)
+            },
+            onSampleReady = { sample ->
+                onNewImuSampleReceived(sample)
             }
         )
 
@@ -323,6 +382,10 @@ class MainActivity : AppCompatActivity() {
     private fun onGpsLocationUpdated(location: Location) {
         lastGpsLocation = location
         val geoPoint = GeoPoint(location.latitude, location.longitude)
+        // Trail point defaults to the raw fix (first-fix branch: identical to
+        // the smoothed anchor anyway); reassigned in the else branch below so
+        // the GPS trail stops recording future outlier spikes too.
+        var trailGeoPoint = geoPoint
 
         // 1. If origin reference point is not set, initialize it from this first GPS fix
         if (originLat == null || originLon == null) {
@@ -340,12 +403,32 @@ class MainActivity : AppCompatActivity() {
             roadProvider.updateOrigin(location.latitude, location.longitude)
             mapMatcher.roadSegments = roadProvider.getActiveSegments()
 
+            displayedGpsState = GpsDisplaySmoother.State(GpsDisplaySmoother.Point(0.0, 0.0))
             gpsMarker?.position = geoPoint
             aiMarker?.position = geoPoint
 
             mapView.controller.setCenter(geoPoint)
         } else {
-            gpsMarker?.position = geoPoint
+            // Display-only smoothing for the blue GPS marker (see
+            // GpsDisplaySmoother doc comment) -- raw GPS jitters a few meters
+            // even when genuinely stationary, and a single bad fix (multipath
+            // spike) needs a confirming second fix before being trusted; this
+            // steadies what's drawn without touching any real
+            // position-estimation state below.
+            val oLatSm = originLat
+            val oLonSm = originLon
+            val smoothedGeoPoint: GeoPoint
+            if (oLatSm != null && oLonSm != null) {
+                val (rawEast, rawNorth) = GeoProjection.latLonToEnu(location.latitude, location.longitude, oLatSm, oLonSm)
+                val newState = GpsDisplaySmoother.update(rawEast, rawNorth, location.accuracy.toDouble(), displayedGpsState)
+                displayedGpsState = newState
+                val (smLat, smLon) = GeoProjection.enuToLatLon(newState.anchor.east, newState.anchor.north, oLatSm, oLonSm)
+                smoothedGeoPoint = GeoPoint(smLat, smLon)
+            } else {
+                smoothedGeoPoint = geoPoint
+            }
+            gpsMarker?.position = smoothedGeoPoint
+            trailGeoPoint = smoothedGeoPoint
             if (!isGpsOutageMode) {
                 // Keep PositionEstimator continuously snapped/synced to real GPS fix (Requirement 1)
                 val oLat = originLat ?: return
@@ -365,8 +448,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 2. Append to GPS trail
-        gpsPolyline?.addPoint(geoPoint)
+        // 2. Append to GPS trail (smoothed point -- see trailGeoPoint doc comment above)
+        gpsPolyline?.addPoint(trailGeoPoint)
         mapView.invalidate()
 
         // 3. Update HUD Display
@@ -397,93 +480,32 @@ class MainActivity : AppCompatActivity() {
 
         if (isGpsOutageMode) {
             // =========================================================================
-            // OUTAGE MODE: AI-DR is authoritative, estimate & display position (Requirement 2)
+            // OUTAGE MODE: legacy C1/physics batch estimate, kept ONLY as a
+            // ~9s diagnostic comparison log against the continuous EKF path.
+            // The continuous EkfPositionEstimator (onNewImuSampleReceived) is
+            // authoritative for position/telemetry/marker updates -- this
+            // block must NOT mutate lastAiState, totalDistanceTraveledM,
+            // outageDistanceTraveledM, or any marker/HUD element, or it will
+            // fight the continuous path's per-sample updates.
             // =========================================================================
             val navState = positionEstimator.estimatePosition(samples)
-            lastAiState = navState
-            totalDistanceTraveledM += navState.deltaS_final
-            outageDistanceTraveledM += navState.deltaS_final
-
             val (aiLat, aiLon) = GeoProjection.enuToLatLon(navState.x, navState.y, oLat, oLon)
-            val rawGeoPoint = GeoPoint(aiLat, aiLon)
-
-            // Lightweight Map-Matching (DISPLAY LAYER ONLY - leaves navState and drift telemetry 100% untouched)
-            val displayGeoPoint = if (isMapMatchingEnabled) {
-                val snapResult = mapMatcher.snap(aiLat, aiLon, Math.toRadians(navState.headingDeg.toDouble()), oLat, oLon)
-                if (snapResult.isSnapped) {
-                    val mapMatchLog = "[MAP_MATCH] Window #$windowCount: SNAPPED by ${String.format("%.1f", snapResult.snapDistanceM)}m onto '${snapResult.matchedRoadName}' (heading diff: ${String.format("%.1f", snapResult.headingDiffDeg)}°) | Raw: (${String.format("%.6f", aiLat)}, ${String.format("%.6f", aiLon)}) -> Display: (${String.format("%.6f", snapResult.displayLat)}, ${String.format("%.6f", snapResult.displayLon)})"
-                    Log.i(TAG_POSITION, mapMatchLog)
-                    GeoPoint(snapResult.displayLat, snapResult.displayLon)
-                } else {
-                    Log.i(TAG_POSITION, "[MAP_MATCH] Window #$windowCount: UNSNAPPED (Raw point preserved)")
-                    rawGeoPoint
-                }
-            } else {
-                rawGeoPoint
-            }
-
             val gps = lastGpsLocation
-            val (driftM, driftPct) = computeDriftMetrics()
-
-            val corrLogStr = if (navState.isStationary) {
-                "0.00m (skipped -- ZUPT active)"
-            } else {
-                "${String.format("%.2f", navState.deltaS_corr)}m"
+            val corrLogStr = when {
+                navState.isStationary -> "0.00m (skipped -- ZUPT active)"
+                navState.correctionFailed -> "0.00m (MODEL INFERENCE FAILED, see correctionModel.lastFailure)"
+                else -> "${String.format("%.2f", navState.deltaS_corr)}m"
             }
-
             val elapsedS = (System.currentTimeMillis() - outageStartTimeMs) / 1000f
-            val logMsg = "[GPS_LOST_MODE] Window #$windowCount (Outage: ${String.format("%.1f", elapsedS)}s) | " +
+            val logMsg = "[GPS_LOST_MODE][LEGACY C1 COMPARE] Window #$windowCount (Outage: ${String.format("%.1f", elapsedS)}s) | " +
                     "True GPS: (${String.format("%.6f", gps?.latitude ?: 0.0)}, ${String.format("%.6f", gps?.longitude ?: 0.0)}) | " +
-                    "AI-DR: (${String.format("%.6f", aiLat)}, ${String.format("%.6f", aiLon)}) | " +
-                    "Outage Drift: ${String.format("%.1f", driftM)}m (${String.format("%.2f", driftPct)}%) | " +
+                    "C1 AI-DR: (${String.format("%.6f", aiLat)}, ${String.format("%.6f", aiLon)}) | " +
                     "dS_imu: ${String.format("%.2f", navState.deltaS_imu)}m | dS_corr: $corrLogStr | " +
                     "dS_final: ${String.format("%.2f", navState.deltaS_final)}m"
+            if (navState.correctionFailed) {
+                Log.w(TAG_POSITION, "CorrectionModel inference failed this window: ${correctionModel.lastFailure}")
+            }
             Log.i(TAG_POSITION, logMsg)
-
-            // Compute signal metrics across this window for diagnostic inspection
-            var sumLinMag = 0f
-            var minLinMag = Float.MAX_VALUE
-            var maxLinMag = 0f
-            var sumRawMag = 0f
-            var sumGyroMag = 0f
-            var maxGyroMag = 0f
-            for (s in samples) {
-                val lMag = kotlin.math.sqrt(s.accLinX * s.accLinX + s.accLinY * s.accLinY + s.accLinZ * s.accLinZ)
-                val rMag = kotlin.math.sqrt(s.accX * s.accX + s.accY * s.accY + s.accZ * s.accZ)
-                val gMag = kotlin.math.sqrt(s.gyroX * s.gyroX + s.gyroY * s.gyroY + s.gyroZ * s.gyroZ)
-                sumLinMag += lMag
-                if (lMag < minLinMag) minLinMag = lMag
-                if (lMag > maxLinMag) maxLinMag = lMag
-                sumRawMag += rMag
-                sumGyroMag += gMag
-                if (gMag > maxGyroMag) maxGyroMag = gMag
-            }
-            val avgLinMag = sumLinMag / samples.size
-            val avgRawMag = sumRawMag / samples.size
-            val avgGyroMag = sumGyroMag / samples.size
-            val s0 = samples.first()
-
-            val diagLog = "Window #$windowCount | isStationary=${navState.isStationary} | " +
-                    "a_mag(lin): avg=${String.format("%.3f", avgLinMag)}, max=${String.format("%.3f", maxLinMag)} m/s² (A_TH=5.389) | " +
-                    "a_raw(grav): avg=${String.format("%.3f", avgRawMag)} m/s² | " +
-                    "gyro_mag: avg=${String.format("%.3f", avgGyroMag)}, max=${String.format("%.3f", maxGyroMag)} rad/s (W_TH=0.753) | " +
-                    "dS_imu=${String.format("%.3f", navState.deltaS_imu)}m, dS_corr=$corrLogStr, dS_final=${String.format("%.3f", navState.deltaS_final)}m, v_eff=${String.format("%.2f", navState.effectiveSpeed * 3.6f)} km/h | " +
-                    "Sample[0] raw_acc=(${String.format("%.2f", s0.accX)}, ${String.format("%.2f", s0.accY)}, ${String.format("%.2f", s0.accZ)}), lin_acc=(${String.format("%.2f", s0.accLinX)}, ${String.format("%.2f", s0.accLinY)}, ${String.format("%.2f", s0.accLinZ)})"
-            Log.i(TAG_POSITION, diagLog)
-
-            runOnUiThread {
-                animateMarkerTo(aiMarker, displayGeoPoint, durationMs = 1000L)
-                mapView.controller.animateTo(displayGeoPoint)
-                aiPolyline?.addPoint(displayGeoPoint)
-                mapView.invalidate()
-
-                val aiSpeedKmh = navState.effectiveSpeed * 3.6f
-                tvAiCoords.text = "Lat: ${String.format("%.5f", aiLat)}\nLon: ${String.format("%.5f", aiLon)}"
-                tvAiMotion.text = "Speed: ${String.format("%.1f", aiSpeedKmh)} km/h | ψ: ${String.format("%.1f", navState.headingDeg)}°"
-                tvWindowCount.text = "Window #$windowCount (Δs=${String.format("%.1f", navState.deltaS_final)}m)"
-
-                updateSeparationAndDrift()
-            }
         } else {
             // =========================================================================
             // GPS ACTIVE MODE: Do NOT draw AI-DR marker or accumulate polyline (Requirement 1)
@@ -501,6 +523,124 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Handles every 10Hz IMU sample. During GPS-active mode, maintains the
+     * rolling pre-outage history buffer used for bias calibration. During
+     * outage mode, drives the continuous EkfPositionEstimator and is
+     * authoritative for the AI-DR marker/polyline/HUD/drift telemetry --
+     * replaces the old ~9s-batch position updates (see onNewImuWindowReceived).
+     */
+    /**
+     * Runs MountingYawCalibrator against the rolling GPS-active history and,
+     * if it converges with reasonable confidence, updates the sensor
+     * collector's mountingYawRad -- the value used to project phone-frame
+     * accel into vehicle-frame forward/lateral for every subsequent sample
+     * (including during the next outage).
+     */
+    private fun recalibrateMountingYaw() {
+        val snapshot = yawCalibHistory.toList()
+        if (snapshot.isEmpty()) return
+
+        val t = DoubleArray(snapshot.size) { snapshot[it].tSec }
+        val vGps = DoubleArray(snapshot.size) { snapshot[it].gpsSpeedMs }
+        val axLin = DoubleArray(snapshot.size) { snapshot[it].accLinX }
+        val ayLin = DoubleArray(snapshot.size) { snapshot[it].accLinY }
+
+        val result = MountingYawCalibrator.calibrate(t, vGps, axLin, ayLin)
+        val maxGpsSpeed = vGps.maxOrNull() ?: 0.0
+        // Require a reasonably confident correlation AND a real speed sample in
+        // the window before trusting a new angle. Raised from 0.3 to 0.6 plus a
+        // minimum-speed floor: a low-speed or near-stationary window can produce
+        // a spuriously "confident"-looking correlation from noise alone, and a
+        // wrong mounting yaw silently rotates the vehicle-forward axis, which
+        // then feeds bad accel into dead reckoning for the whole next outage.
+        if (result.calibrated && result.correlation > YAW_CALIB_MIN_CORRELATION && maxGpsSpeed >= YAW_CALIB_MIN_SPEED_MS) {
+            sensorCollector.mountingYawRad = result.thetaRad.toFloat()
+            Log.i(TAG_POSITION, "MOUNTING YAW recalibrated: theta=${String.format("%.1f", Math.toDegrees(result.thetaRad))}deg " +
+                "corr=${String.format("%.3f", result.correlation)} (from ${snapshot.size} GPS-active samples, maxSpeed=${String.format("%.1f", maxGpsSpeed)}m/s)")
+        } else {
+            Log.i(TAG_POSITION, "MOUNTING YAW recalibration skipped: calibrated=${result.calibrated} corr=${String.format("%.3f", result.correlation)} maxSpeed=${String.format("%.1f", maxGpsSpeed)}m/s (kept previous ${String.format("%.1f", Math.toDegrees(sensorCollector.mountingYawRad.toDouble()))}deg)")
+        }
+    }
+
+    private fun onNewImuSampleReceived(sample: IMUSensorCollector.Sample) {
+        val oLat = originLat ?: return
+        val oLon = originLon ?: return
+
+        if (!isGpsOutageMode) {
+            preOutageHistory.addLast(sample)
+            while (preOutageHistory.size > PRE_OUTAGE_HISTORY_MAX_SAMPLES) preOutageHistory.removeFirst()
+
+            val gpsSpeed = lastGpsLocation?.speed
+            if (gpsSpeed != null) {
+                yawCalibHistory.addLast(
+                    YawCalibSample(
+                        tSec = sample.timestampNs / 1_000_000_000.0,
+                        gpsSpeedMs = gpsSpeed.toDouble(),
+                        accLinX = sample.accLinX.toDouble(),
+                        accLinY = sample.accLinY.toDouble()
+                    )
+                )
+                while (yawCalibHistory.size > YAW_CALIB_HISTORY_MAX_SAMPLES) yawCalibHistory.removeFirst()
+
+                yawSamplesSinceRecalibration++
+                if (yawSamplesSinceRecalibration >= YAW_RECALIBRATION_INTERVAL_SAMPLES) {
+                    yawSamplesSinceRecalibration = 0
+                    recalibrateMountingYaw()
+                }
+            }
+            return
+        }
+
+        val nowNs = sample.timestampNs
+        val dtSeconds = if (lastEkfSampleNs == 0L) 0.1 else {
+            ((nowNs - lastEkfSampleNs) / 1_000_000_000.0).coerceIn(0.01, 1.0)
+        }
+        lastEkfSampleNs = nowNs
+
+        val snapshot = ekfEstimator.onSample(sample, dtSeconds) ?: return
+
+        val stepDistM = kotlin.math.hypot(snapshot.x - lastEkfEast, snapshot.y - lastEkfNorth).toFloat()
+        lastEkfEast = snapshot.x
+        lastEkfNorth = snapshot.y
+        totalDistanceTraveledM += stepDistM
+        outageDistanceTraveledM += stepDistM
+
+        lastAiState = NavigationState(
+            x = snapshot.x.toFloat(), y = snapshot.y.toFloat(),
+            heading = snapshot.heading.toFloat(), headingDeg = snapshot.headingDeg.toFloat(),
+            velocity = snapshot.speed.toFloat(),
+            deltaS_imu = stepDistM, deltaS_corr = 0f, deltaS_final = stepDistM,
+            headingDir = snapshot.heading.toFloat(), headingDirDeg = snapshot.headingDeg.toFloat(),
+            isStationary = false, effectiveSpeed = snapshot.speed.toFloat()
+        )
+
+        val (aiLat, aiLon) = GeoProjection.enuToLatLon(snapshot.x, snapshot.y, oLat, oLon)
+        val rawGeoPoint = GeoPoint(aiLat, aiLon)
+
+        // Display-layer map snap (separate from ekfEstimator's own internal
+        // heading feedback via matchHeading -- this one is purely visual).
+        val displayGeoPoint = if (isMapMatchingEnabled) {
+            val snapResult = mapMatcher.snap(aiLat, aiLon, snapshot.heading, oLat, oLon)
+            if (snapResult.isSnapped) GeoPoint(snapResult.displayLat, snapResult.displayLon) else rawGeoPoint
+        } else {
+            rawGeoPoint
+        }
+
+        runOnUiThread {
+            aiMarker?.position = displayGeoPoint
+            mapView.controller.animateTo(displayGeoPoint)
+            aiPolyline?.addPoint(displayGeoPoint)
+            mapView.invalidate()
+
+            val aiSpeedKmh = snapshot.speed.toFloat() * 3.6f
+            tvAiCoords.text = "Lat: ${String.format("%.5f", aiLat)}\nLon: ${String.format("%.5f", aiLon)}"
+            tvAiMotion.text = "Speed: ${String.format("%.1f", aiSpeedKmh)} km/h | ψ: ${String.format("%.1f", snapshot.headingDeg)}°" +
+                (if (snapshot.isMapMatched) " [map-matched]" else "")
+            updateSeparationAndDrift()
+        }
+    }
+
+    /**
      * Toggles between GPS Active and GPS Lost (Simulated) Dead Reckoning mode.
      */
     private fun toggleGpsOutageMode() {
@@ -511,6 +651,18 @@ class MainActivity : AppCompatActivity() {
         if (gps == null || oLat == null || oLon == null) {
             Toast.makeText(this, "Waiting for initial GPS fix...", Toast.LENGTH_SHORT).show()
             return
+        }
+
+        if (!isGpsOutageMode && gps.speed < OUTAGE_START_MIN_SPEED_MS) {
+            // Not a hard block -- EkfPositionEstimator's pre-motion hard lock
+            // (see its doc comment) keeps the marker pinned instead of drifting
+            // even if the user proceeds from a standing start. This is just so
+            // the "why isn't the dot moving" question has an answer on screen.
+            Toast.makeText(
+                this,
+                "Start moving before simulating GPS outage for best accuracy (currently ${String.format("%.1f", gps.speed * 3.6)} km/h)",
+                Toast.LENGTH_LONG
+            ).show()
         }
 
         if (!isGpsOutageMode) {
@@ -532,6 +684,27 @@ class MainActivity : AppCompatActivity() {
                 heading = trueBearingRad,
                 velocity = trueVelocity
             )
+
+            // Get the freshest possible mounting-yaw estimate right before
+            // the outage begins (subsequent samples during outage cannot
+            // recalibrate -- no GPS ground truth to correlate against).
+            recalibrateMountingYaw()
+
+            // Start the continuous EKF (authoritative path) at this same
+            // boundary, seeded with pre-outage bias calibration.
+            val biasCalibration = ekfEstimator.calibrateBiasesFromHistory(preOutageHistory.toList())
+            ekfEstimator.startOutage(
+                initPosEnu = doubleArrayOf(gpsEast, gpsNorth),
+                initHeading = trueBearingRad.toDouble(),
+                initSpeed = trueVelocity.toDouble(),
+                biasCalibration = biasCalibration
+            )
+            lastEkfEast = gpsEast
+            lastEkfNorth = gpsNorth
+            lastEkfSampleNs = 0L
+            Log.i(TAG_POSITION, "EKF bias calibration: accelCalibrated=${biasCalibration.accelCalibrated} " +
+                "gyroCalibrated=${biasCalibration.gyroCalibrated} bAx=${biasCalibration.bAx} bAy=${biasCalibration.bAy} bW=${biasCalibration.bW} " +
+                "(from ${preOutageHistory.size} pre-outage history samples)")
 
             // Snap AI marker exactly to current GPS position at start of outage
             val currentGpsGeoPoint = GeoPoint(gps.latitude, gps.longitude)
@@ -609,6 +782,7 @@ class MainActivity : AppCompatActivity() {
             // Smoothly animate the AI marker from its DR position to the true GPS position over 1.8 seconds
             animateResync(aiMarker, aiCurrentGeo, realGpsGeo, durationMs = 1800L) {
                 isGpsOutageMode = false
+                ekfEstimator.stopOutage()
 
                 // 1. Hide AI-DR marker and polyline (Requirements 1 & 3)
                 aiMarker?.isEnabled = false
@@ -620,13 +794,17 @@ class MainActivity : AppCompatActivity() {
                 gpsMarker?.alpha = 1.0f
                 gpsMarker?.title = "Primary: Real GPS Location"
 
-                // 3. Re-align PositionEstimator to current GPS position for clean continuous tracking
-                val (gpsEast, gpsNorth) = GeoProjection.latLonToEnu(gps.latitude, gps.longitude, oLat, oLon)
+                // 3. Re-align PositionEstimator to current GPS position for clean continuous tracking.
+                // Use the LIVE lastGpsLocation here, not the `gps` value captured 1.8s ago at the
+                // start of this function -- at highway speed that staleness alone is ~30m of lag.
+                // (Bug found and fixed this session.)
+                val freshGps = lastGpsLocation ?: gps
+                val (gpsEast, gpsNorth) = GeoProjection.latLonToEnu(freshGps.latitude, freshGps.longitude, oLat, oLon)
                 positionEstimator.resetState(
                     x = gpsEast.toFloat(),
                     y = gpsNorth.toFloat(),
-                    heading = Math.toRadians(gps.bearing.toDouble()).toFloat(),
-                    velocity = gps.speed
+                    heading = Math.toRadians(freshGps.bearing.toDouble()).toFloat(),
+                    velocity = freshGps.speed
                 )
 
                 // 4. Restore controls & HUD
@@ -782,10 +960,25 @@ class MainActivity : AppCompatActivity() {
         positionEstimator.resetState(0.0f, 0.0f, initialBearingRad, gps.speed)
 
         val currentGeo = GeoPoint(gps.latitude, gps.longitude)
+        displayedGpsState = GpsDisplaySmoother.State(GpsDisplaySmoother.Point(0.0, 0.0)) // origin just redefined to this fix
         gpsMarker?.position = currentGeo
         gpsPolyline?.setPoints(mutableListOf(currentGeo))
 
         if (isGpsOutageMode) {
+            // Origin moved -- the EKF's (x,y) are relative to the OLD origin
+            // and would otherwise jump. Restart it at the new (0,0) origin
+            // with fresh bias calibration, same as the initial outage start.
+            val biasCalibration = ekfEstimator.calibrateBiasesFromHistory(preOutageHistory.toList())
+            ekfEstimator.startOutage(
+                initPosEnu = doubleArrayOf(0.0, 0.0),
+                initHeading = initialBearingRad.toDouble(),
+                initSpeed = gps.speed.toDouble(),
+                biasCalibration = biasCalibration
+            )
+            lastEkfEast = 0.0
+            lastEkfNorth = 0.0
+            lastEkfSampleNs = 0L
+
             aiMarker?.position = currentGeo
             aiMarker?.isEnabled = true
             aiMarker?.alpha = 1.0f
@@ -830,5 +1023,6 @@ class MainActivity : AppCompatActivity() {
         fusedLocationClient.removeLocationUpdates(locationCallback)
         sensorCollector.stop()
         correctionModel.close()
+        velocityModel.close()
     }
 }

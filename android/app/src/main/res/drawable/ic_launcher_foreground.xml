@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Reckon AI launcher icon foreground: blue ring (GPS lock) fused with an
+     orange navigation arrow (AI dead reckoning heading), same two colors
+     used for the app's own live gpsMarker/aiMarker on the map. -->
+<vector xmlns:android="http://schemas.org/apk/res/vector"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- GPS ring -->
+    <path
+        android:pathData="M26,54 A28,28 0 1 1 82,54 A28,28 0 1 1 26,54 Z"
+        android:strokeColor="#1E88E5"
+        android:strokeWidth="5"
+        android:fillColor="#00000000" />
+
+    <!-- AI-DR navigation arrow -->
+    <path
+        android:pathData="M54,28 L67,72 L54,61 L41,72 Z"
+        android:fillColor="#FF5722" />
+</vector>

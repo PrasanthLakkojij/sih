@@ -21,6 +21,10 @@ import kotlin.math.sin
  * @param deltaS_final Total corrected displacement: max(0.0, deltaS_imu + deltaS_corr) in meters.
  * @param headingDir Motion displacement vector azimuth in radians (atan2(de, dn)).
  * @param headingDirDeg Motion displacement vector azimuth in degrees.
+ * @param correctionFailed True if the ML correction model's inference failed this
+ * window (deltaS_corr falls back to 0.0 in that case) -- distinguishes "model
+ * genuinely predicted no correction" from "model call failed", so callers/logs
+ * don't silently treat a broken model as if it agreed with physics.
  */
 data class NavigationState(
     val x: Float,
@@ -34,7 +38,8 @@ data class NavigationState(
     val headingDir: Float,
     val headingDirDeg: Float,
     val isStationary: Boolean = false,
-    val effectiveSpeed: Float = 0.0f
+    val effectiveSpeed: Float = 0.0f,
+    val correctionFailed: Boolean = false
 )
 
 /**
@@ -130,6 +135,7 @@ class PositionEstimator(
         )
 
         // 2. Combine physics displacement and ML correction with ZUPT gating
+        var correctionFailed = false
         val (deltaS_corr, correctedDeltaS) = if (physResult.isStationary) {
             // ZUPT active (device did not move): skip ML prediction and set correction to 0
             Pair(0.0f, physResult.deltaS_imu)
@@ -150,8 +156,14 @@ class PositionEstimator(
                 segDurS = duration,
                 nSamp = nSamples
             )
+            // null means inference failed (see ICorrectionModel doc) -- fall
+            // back to zero correction numerically, same as before, but flag
+            // it via correctionFailed so callers can tell the difference
+            // between "model says no correction" and "model call broke".
             val corr = correctionModel.predict(features)
-            Pair(corr, max(0.0f, physResult.deltaS_imu + corr))
+            if (corr == null) correctionFailed = true
+            val correctionValue = corr ?: 0.0f
+            Pair(correctionValue, max(0.0f, physResult.deltaS_imu + correctionValue))
         }
 
         // 3. Compute real speed from actual applied position delta over window duration
@@ -178,7 +190,8 @@ class PositionEstimator(
             headingDir = physResult.headingDir,
             headingDirDeg = physResult.headingDirDeg,
             isStationary = physResult.isStationary,
-            effectiveSpeed = effectiveSpeedMs
+            effectiveSpeed = effectiveSpeedMs,
+            correctionFailed = correctionFailed
         )
     }
 

@@ -476,6 +476,16 @@ if __name__ == "__main__":
     # Build dataset
     X_all, yA_all, yB_all, yC_all, meta_all = build_segment_dataset()
 
+    # Persist cache for downstream phases (Phase 9 reads this)
+    CACHE_DIR = Path("data") / "phase8_cache"
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    meta_all.to_parquet(CACHE_DIR / "meta_all.parquet")
+    np.save(CACHE_DIR / "X_all.npy", X_all)
+    np.save(CACHE_DIR / "yA_all.npy", yA_all)
+    np.save(CACHE_DIR / "yB_all.npy", yB_all)
+    np.save(CACHE_DIR / "yC_all.npy", yC_all)
+    print(f"\n  Cache written to {CACHE_DIR} for Phase 9.")
+
     # ----------------------------------------------------------------
     # Run LOTO CV for all three targets
     # ----------------------------------------------------------------

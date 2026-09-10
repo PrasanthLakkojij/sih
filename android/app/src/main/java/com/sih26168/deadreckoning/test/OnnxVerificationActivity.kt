@@ -174,21 +174,26 @@ class OnnxVerificationActivity : AppCompatActivity() {
             // 2. Feed computed features into ONNX CorrectionModel
             val activeModel = model ?: CorrectionModel(this).also { model = it }
             val prediction = activeModel.predict(computedFeatures)
-            val predDiff = Math.abs(prediction - EXPECTED_PREDICTION_METERS)
-
-            Log.i(TAG_ONNX, "ONNX Prediction from extracted features: $prediction meters")
-            Log.i(TAG_ONNX, "Expected prediction: $EXPECTED_PREDICTION_METERS meters (diff=$predDiff)")
             appendLog("\nONNX Model Inference Verification:")
-            appendLog("  Prediction: $prediction meters")
-            appendLog("  Expected  : $EXPECTED_PREDICTION_METERS meters")
-            appendLog("  Diff      : $predDiff meters")
 
-            if (predDiff < TOLERANCE_METERS) {
-                Log.i(TAG_ONNX, ">>> ONNX PREDICTION ON EXTRACTED FEATURES: PASSED <<<")
-                appendLog("  Result: PASSED (tolerance < 0.01m)")
+            if (prediction == null) {
+                Log.e(TAG_ONNX, ">>> ONNX PREDICTION ON EXTRACTED FEATURES: FAILED (inference error) <<<", activeModel.lastFailure)
+                appendLog("  Result: FAILED -- inference error: ${activeModel.lastFailure}")
             } else {
-                Log.e(TAG_ONNX, ">>> ONNX PREDICTION ON EXTRACTED FEATURES: FAILED <<<")
-                appendLog("  Result: FAILED")
+                val predDiff = Math.abs(prediction - EXPECTED_PREDICTION_METERS)
+                Log.i(TAG_ONNX, "ONNX Prediction from extracted features: $prediction meters")
+                Log.i(TAG_ONNX, "Expected prediction: $EXPECTED_PREDICTION_METERS meters (diff=$predDiff)")
+                appendLog("  Prediction: $prediction meters")
+                appendLog("  Expected  : $EXPECTED_PREDICTION_METERS meters")
+                appendLog("  Diff      : $predDiff meters")
+
+                if (predDiff < TOLERANCE_METERS) {
+                    Log.i(TAG_ONNX, ">>> ONNX PREDICTION ON EXTRACTED FEATURES: PASSED <<<")
+                    appendLog("  Result: PASSED (tolerance < 0.01m)")
+                } else {
+                    Log.e(TAG_ONNX, ">>> ONNX PREDICTION ON EXTRACTED FEATURES: FAILED <<<")
+                    appendLog("  Result: FAILED")
+                }
             }
 
             // 3. Step 3b: Test PhysicsDeadReckoning on Window 0

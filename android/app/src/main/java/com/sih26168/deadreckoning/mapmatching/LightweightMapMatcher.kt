@@ -15,16 +15,21 @@ import kotlin.math.sqrt
  *
  * Core Guarantees:
  * 1. DISPLAY ONLY: Does not modify PositionEstimator internal state or benchmark drift calculations.
- * 2. HEADING GATED: Only considers candidate road segments within 45° of current vehicle heading,
+ * 2. HEADING GATED: Only considers candidate road segments within 30° of current vehicle heading,
  *    preventing spurious snapping onto perpendicular cross-streets.
- * 3. DISTANCE TOLERANCE: Rejects candidates farther than 50m to avoid forced snaps on distant roads.
+ * 3. DISTANCE TOLERANCE: Rejects candidates farther than 25m to avoid forced snaps on distant roads.
+ *    (Tightened from 50m/45deg: matchHeading()'s result feeds EkfPositionEstimator.updateHeading(),
+ *    so a loose gate lets an already-drifted position get "confirmed" by snapping onto a merely
+ *    nearby road and correcting heading toward it -- a positive feedback loop that compounds an
+ *    existing drift rather than catching it. Reported handheld-rotation drift scenario made a
+ *    ~20-30m drift look validated this way.)
  * 4. FAIL-SAFE: Gracefully falls back to raw coordinates if no compatible road is nearby or if
  *    road data is unavailable.
  */
 class LightweightMapMatcher(
     var roadSegments: List<RoadSegment> = emptyList(),
-    val maxSnapDistanceM: Double = 50.0,
-    val maxHeadingDiffRad: Double = Math.toRadians(45.0)
+    val maxSnapDistanceM: Double = 25.0,
+    val maxHeadingDiffRad: Double = Math.toRadians(30.0)
 ) {
     companion object {
         private const val TWO_PI = 2.0 * PI
@@ -159,5 +164,55 @@ class LightweightMapMatcher(
                 matchedRoadName = null
             )
         }
+    }
+
+    /**
+     * Position-only variant of [snap]: given a point already in local ENU
+     * meters (matching roadSegments' own frame -- no lat/lon conversion, so
+     * this can be called every EKF step without repeated GeoProjection
+     * round-trips), returns the matched road segment's own heading direction
+     * (bidirectional-resolved toward the closer match to headingRad), or null
+     * if no segment passes the same 45deg/50m gates as [snap].
+     *
+     * Distinct from [snap]: that method is display-only and returns a
+     * snapped position; this one is for feeding EkfPositionEstimator's
+     * updateHeading() and never touches position, matching this session's
+     * Python match_road_heading() in phase10_fusion_engine.py exactly.
+     */
+    fun matchHeading(px: Double, py: Double, headingRad: Double): Double? {
+        val segments = roadSegments
+        if (segments.isEmpty()) return null
+
+        var bestHeading: Double? = null
+        var bestDistance = maxSnapDistanceM
+
+        for (seg in segments) {
+            val dx = seg.x2 - seg.x1
+            val dy = seg.y2 - seg.y1
+            val lenSq = dx * dx + dy * dy
+            if (lenSq < 1e-4) continue
+
+            val segHeading = atan2(dx, dy)
+            val angleDiff = computeBidirectionalAngleDiff(headingRad, segHeading)
+            if (angleDiff > maxHeadingDiffRad) continue
+
+            val t = ((px - seg.x1) * dx + (py - seg.y1) * dy) / lenSq
+            val clampedT = t.coerceIn(0.0, 1.0)
+            val qx = seg.x1 + clampedT * dx
+            val qy = seg.y1 + clampedT * dy
+            val dist = sqrt((px - qx) * (px - qx) + (py - qy) * (py - qy))
+            if (dist >= bestDistance) continue
+
+            // Resolve to whichever direction of the (bidirectional) segment
+            // is closer to the current heading estimate.
+            val segHeadingRev = normalizeAngleRad(segHeading + PI)
+            val diffFwd = abs(normalizeAngleRad(headingRad) - normalizeAngleRad(segHeading)).let { min(it, TWO_PI - it) }
+            val diffRev = abs(normalizeAngleRad(headingRad) - segHeadingRev).let { min(it, TWO_PI - it) }
+            val matchedHeading = if (diffFwd <= diffRev) segHeading else segHeadingRev
+
+            bestDistance = dist
+            bestHeading = matchedHeading
+        }
+        return bestHeading
     }
 }

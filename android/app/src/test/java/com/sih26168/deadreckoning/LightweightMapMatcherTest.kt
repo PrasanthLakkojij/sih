@@ -176,6 +176,38 @@ class LightweightMapMatcherTest {
     }
 
     @Test
+    fun testMatchHeading_returnsRoadDirectionForCompatiblePoint() {
+        // Same scenario as testParallelRoadSnapping: point 15m East of a
+        // North-South road, vehicle heading North.
+        val (roadEast, roadNorth) = GeoProjection.latLonToEnu(17.718500, 83.171000, originLat, originLon)
+        val px = roadEast + 15.0
+        val py = roadNorth
+        val headingRad = Math.toRadians(5.0)
+
+        val matched = mapMatcher.matchHeading(px, py, headingRad)
+
+        org.junit.Assert.assertNotNull("Should match Lakeside Road's heading", matched)
+        // Lakeside Road runs from lat 17.717 to 17.720 (due North) -> ~0 rad
+        assertEquals(0.0, matched!!, Math.toRadians(2.0))
+    }
+
+    @Test
+    fun testMatchHeading_returnsNull_whenPerpendicular() {
+        val (roadEast, roadNorth) = GeoProjection.latLonToEnu(17.718500, 83.172000, originLat, originLon)
+        val px = roadEast
+        val py = roadNorth + 10.0
+        val headingRad = Math.toRadians(0.0)
+
+        assertEquals(null, mapMatcher.matchHeading(px, py, headingRad))
+    }
+
+    @Test
+    fun testMatchHeading_returnsNull_whenNoRoadsLoaded() {
+        val emptyMatcher = LightweightMapMatcher(roadSegments = emptyList())
+        assertEquals(null, emptyMatcher.matchHeading(0.0, 0.0, 0.0))
+    }
+
+    @Test
     fun testPositionEstimatorInvariance() {
         // Verify Requirement 2d: Map matching does NOT touch or mutate PositionEstimator state
         val dummyModel = ICorrectionModel { 2.5f }
