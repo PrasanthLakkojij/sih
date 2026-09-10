@@ -46,6 +46,7 @@ import com.sih26168.deadreckoning.test.OnnxVerificationActivity
 import com.sih26168.deadreckoning.mapmatching.LightweightMapMatcher
 import com.sih26168.deadreckoning.mapmatching.OverpassRoadProvider
 import com.sih26168.deadreckoning.util.GeoProjection
+import com.sih26168.deadreckoning.util.GpsDisplaySmoother
 import com.sih26168.deadreckoning.util.LatLng
 import com.sih26168.deadreckoning.util.SphericalLatLonInterpolator
 import org.osmdroid.config.Configuration
@@ -91,6 +92,12 @@ class MainActivity : AppCompatActivity() {
         // the correlation search over 361 angles is cheap but pointless to
         // rerun every 100ms when the mounting hasn't changed.
         private const val YAW_RECALIBRATION_INTERVAL_SAMPLES = 300
+        // Raised from 0.3 -- see recalibrateMountingYaw() doc comment.
+        private const val YAW_CALIB_MIN_CORRELATION = 0.6
+        private const val YAW_CALIB_MIN_SPEED_MS = 2.78 // ~10 km/h
+        // Below this, dead reckoning is started from a state the pipeline has
+        // no way to validate is genuinely "moving" -- see toggleGpsOutageMode().
+        private const val OUTAGE_START_MIN_SPEED_MS = 1.5 // ~5.4 km/h
     }
 
     private lateinit var mapView: MapView
@@ -140,6 +147,10 @@ class MainActivity : AppCompatActivity() {
     // osmdroid Markers & Polylines
     private var gpsMarker: Marker? = null
     private var aiMarker: Marker? = null
+    // Display-only smoothing state for the blue GPS marker -- see
+    // GpsDisplaySmoother doc comment. Never read by anything that does real
+    // position estimation; those all keep consuming the raw Location fix.
+    private var displayedGpsState: GpsDisplaySmoother.State? = null
     private var gpsPolyline: Polyline? = null
     private var aiPolyline: Polyline? = null
 
@@ -371,6 +382,10 @@ class MainActivity : AppCompatActivity() {
     private fun onGpsLocationUpdated(location: Location) {
         lastGpsLocation = location
         val geoPoint = GeoPoint(location.latitude, location.longitude)
+        // Trail point defaults to the raw fix (first-fix branch: identical to
+        // the smoothed anchor anyway); reassigned in the else branch below so
+        // the GPS trail stops recording future outlier spikes too.
+        var trailGeoPoint = geoPoint
 
         // 1. If origin reference point is not set, initialize it from this first GPS fix
         if (originLat == null || originLon == null) {
@@ -388,12 +403,32 @@ class MainActivity : AppCompatActivity() {
             roadProvider.updateOrigin(location.latitude, location.longitude)
             mapMatcher.roadSegments = roadProvider.getActiveSegments()
 
+            displayedGpsState = GpsDisplaySmoother.State(GpsDisplaySmoother.Point(0.0, 0.0))
             gpsMarker?.position = geoPoint
             aiMarker?.position = geoPoint
 
             mapView.controller.setCenter(geoPoint)
         } else {
-            gpsMarker?.position = geoPoint
+            // Display-only smoothing for the blue GPS marker (see
+            // GpsDisplaySmoother doc comment) -- raw GPS jitters a few meters
+            // even when genuinely stationary, and a single bad fix (multipath
+            // spike) needs a confirming second fix before being trusted; this
+            // steadies what's drawn without touching any real
+            // position-estimation state below.
+            val oLatSm = originLat
+            val oLonSm = originLon
+            val smoothedGeoPoint: GeoPoint
+            if (oLatSm != null && oLonSm != null) {
+                val (rawEast, rawNorth) = GeoProjection.latLonToEnu(location.latitude, location.longitude, oLatSm, oLonSm)
+                val newState = GpsDisplaySmoother.update(rawEast, rawNorth, location.accuracy.toDouble(), displayedGpsState)
+                displayedGpsState = newState
+                val (smLat, smLon) = GeoProjection.enuToLatLon(newState.anchor.east, newState.anchor.north, oLatSm, oLonSm)
+                smoothedGeoPoint = GeoPoint(smLat, smLon)
+            } else {
+                smoothedGeoPoint = geoPoint
+            }
+            gpsMarker?.position = smoothedGeoPoint
+            trailGeoPoint = smoothedGeoPoint
             if (!isGpsOutageMode) {
                 // Keep PositionEstimator continuously snapped/synced to real GPS fix (Requirement 1)
                 val oLat = originLat ?: return
@@ -413,8 +448,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 2. Append to GPS trail
-        gpsPolyline?.addPoint(geoPoint)
+        // 2. Append to GPS trail (smoothed point -- see trailGeoPoint doc comment above)
+        gpsPolyline?.addPoint(trailGeoPoint)
         mapView.invalidate()
 
         // 3. Update HUD Display
@@ -511,16 +546,19 @@ class MainActivity : AppCompatActivity() {
         val ayLin = DoubleArray(snapshot.size) { snapshot[it].accLinY }
 
         val result = MountingYawCalibrator.calibrate(t, vGps, axLin, ayLin)
-        // Require a reasonably confident correlation before trusting a new
-        // angle -- a low/negative correlation means the search didn't find a
-        // consistent mounting direction (e.g. too little real acceleration
-        // variety yet) and should not override the previous estimate.
-        if (result.calibrated && result.correlation > 0.3) {
+        val maxGpsSpeed = vGps.maxOrNull() ?: 0.0
+        // Require a reasonably confident correlation AND a real speed sample in
+        // the window before trusting a new angle. Raised from 0.3 to 0.6 plus a
+        // minimum-speed floor: a low-speed or near-stationary window can produce
+        // a spuriously "confident"-looking correlation from noise alone, and a
+        // wrong mounting yaw silently rotates the vehicle-forward axis, which
+        // then feeds bad accel into dead reckoning for the whole next outage.
+        if (result.calibrated && result.correlation > YAW_CALIB_MIN_CORRELATION && maxGpsSpeed >= YAW_CALIB_MIN_SPEED_MS) {
             sensorCollector.mountingYawRad = result.thetaRad.toFloat()
             Log.i(TAG_POSITION, "MOUNTING YAW recalibrated: theta=${String.format("%.1f", Math.toDegrees(result.thetaRad))}deg " +
-                "corr=${String.format("%.3f", result.correlation)} (from ${snapshot.size} GPS-active samples)")
+                "corr=${String.format("%.3f", result.correlation)} (from ${snapshot.size} GPS-active samples, maxSpeed=${String.format("%.1f", maxGpsSpeed)}m/s)")
         } else {
-            Log.i(TAG_POSITION, "MOUNTING YAW recalibration skipped: calibrated=${result.calibrated} corr=${String.format("%.3f", result.correlation)} (kept previous ${String.format("%.1f", Math.toDegrees(sensorCollector.mountingYawRad.toDouble()))}deg)")
+            Log.i(TAG_POSITION, "MOUNTING YAW recalibration skipped: calibrated=${result.calibrated} corr=${String.format("%.3f", result.correlation)} maxSpeed=${String.format("%.1f", maxGpsSpeed)}m/s (kept previous ${String.format("%.1f", Math.toDegrees(sensorCollector.mountingYawRad.toDouble()))}deg)")
         }
     }
 
@@ -613,6 +651,18 @@ class MainActivity : AppCompatActivity() {
         if (gps == null || oLat == null || oLon == null) {
             Toast.makeText(this, "Waiting for initial GPS fix...", Toast.LENGTH_SHORT).show()
             return
+        }
+
+        if (!isGpsOutageMode && gps.speed < OUTAGE_START_MIN_SPEED_MS) {
+            // Not a hard block -- EkfPositionEstimator's pre-motion hard lock
+            // (see its doc comment) keeps the marker pinned instead of drifting
+            // even if the user proceeds from a standing start. This is just so
+            // the "why isn't the dot moving" question has an answer on screen.
+            Toast.makeText(
+                this,
+                "Start moving before simulating GPS outage for best accuracy (currently ${String.format("%.1f", gps.speed * 3.6)} km/h)",
+                Toast.LENGTH_LONG
+            ).show()
         }
 
         if (!isGpsOutageMode) {
@@ -910,6 +960,7 @@ class MainActivity : AppCompatActivity() {
         positionEstimator.resetState(0.0f, 0.0f, initialBearingRad, gps.speed)
 
         val currentGeo = GeoPoint(gps.latitude, gps.longitude)
+        displayedGpsState = GpsDisplaySmoother.State(GpsDisplaySmoother.Point(0.0, 0.0)) // origin just redefined to this fix
         gpsMarker?.position = currentGeo
         gpsPolyline?.setPoints(mutableListOf(currentGeo))
 

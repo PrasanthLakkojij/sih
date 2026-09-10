@@ -15,16 +15,21 @@ import kotlin.math.sqrt
  *
  * Core Guarantees:
  * 1. DISPLAY ONLY: Does not modify PositionEstimator internal state or benchmark drift calculations.
- * 2. HEADING GATED: Only considers candidate road segments within 45° of current vehicle heading,
+ * 2. HEADING GATED: Only considers candidate road segments within 30° of current vehicle heading,
  *    preventing spurious snapping onto perpendicular cross-streets.
- * 3. DISTANCE TOLERANCE: Rejects candidates farther than 50m to avoid forced snaps on distant roads.
+ * 3. DISTANCE TOLERANCE: Rejects candidates farther than 25m to avoid forced snaps on distant roads.
+ *    (Tightened from 50m/45deg: matchHeading()'s result feeds EkfPositionEstimator.updateHeading(),
+ *    so a loose gate lets an already-drifted position get "confirmed" by snapping onto a merely
+ *    nearby road and correcting heading toward it -- a positive feedback loop that compounds an
+ *    existing drift rather than catching it. Reported handheld-rotation drift scenario made a
+ *    ~20-30m drift look validated this way.)
  * 4. FAIL-SAFE: Gracefully falls back to raw coordinates if no compatible road is nearby or if
  *    road data is unavailable.
  */
 class LightweightMapMatcher(
     var roadSegments: List<RoadSegment> = emptyList(),
-    val maxSnapDistanceM: Double = 50.0,
-    val maxHeadingDiffRad: Double = Math.toRadians(45.0)
+    val maxSnapDistanceM: Double = 25.0,
+    val maxHeadingDiffRad: Double = Math.toRadians(30.0)
 ) {
     companion object {
         private const val TWO_PI = 2.0 * PI
